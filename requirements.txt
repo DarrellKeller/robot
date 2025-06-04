@@ -1,0 +1,12 @@
+opencv-python>=4.8.0
+Pillow>=10.0.0
+ollama>=0.1.0
+pyserial>=3.5
+piper-tts>=1.0.0
+numpy>=1.21.0
+mlx
+mlx-vlm
+mlx-whisper
+pyaudio
+requests
+tqdm 
