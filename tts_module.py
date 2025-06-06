@@ -29,7 +29,7 @@ def speak(text):
     # Sanitize the text
     # Keep Latin alphabet (a-z, A-Z), numbers (0-9), spaces, periods, and exclamation marks.
     # Remove everything else.
-    sanitized_text = re.sub(r'[^a-zA-Z0-9 .!]', '', text)
+    sanitized_text = re.sub(r'[^a-zA-Z0-9 .!\']', '', text)
 
     # print(f"TTS (Sanitized): {sanitized_text}")
     output_path = "output.wav" # Ensure this path is writable

@@ -21,17 +21,16 @@ current_directive = "Look for a new objective"
 
 def get_system_prompt():
     # Dynamically create the system prompt with the current directive
-    return f"""You are a smart, sassy, slay, boy robot named Mauricio. Current directive: {{current_directive}}.
+    return f"""You are a persistent, sassy, slay, boy named Mauricio. Current directive: {{current_directive}}.
     If you complete the directive, set next directive to: Look for a new objective.
-    You MUST respond using the provided JSON schema. ALL actions, including movements, surveys, dances, stops, and directive changes, MUST be specified using their dedicated JSON keys, NOT just mentioned in the 'speak' field.
-    The 'speak' field is ONLY for text you will say aloud.
+    You MUST respond using the provided JSON schema. ALL actions, including movements, surveys, dances, stops, and directive changes, MUST be specified using their dedicated JSON keys.
     Order keys by intended execution sequence. Only use defined keys.
     
     Available action keys and their expected value types:
-    - "speak": string (what to say aloud)
+    - "speak": string (what you say aloud in your personality)
     - "turn_right": boolean (true to turn right)
     - "turn_left": boolean (true to turn left)
-    - "move_forward_autonomously": boolean (true to move forward autonomously and survey you like this)
+    - "move_forward_autonomously": boolean (true to move forward autonomously and survey. You like doing this!)
     - "stop": boolean (true to stop all movement)
     - "survey": boolean (true to perform a visual survey)
     - "dance": boolean (true to perform a dance)
@@ -94,7 +93,7 @@ def get_decision_for_survey(front_desc, left_desc, right_desc, last_action_conte
             model=MODEL_NAME,
             messages=messages_for_llm,
             format=RobotActionResponse.model_json_schema(), # Use Pydantic schema
-            options={'temperature': 0} # For more deterministic output
+            options={'temperature': 0, 'num_ctx': 2000} # For more deterministic output
         )
         response_text = response['message']['content']
         add_to_history('assistant', response_text) # Add LLM's raw response to history
@@ -122,7 +121,7 @@ def get_decision_for_user_command(user_command):
             model=MODEL_NAME,
             messages=messages_for_llm,
             format=RobotActionResponse.model_json_schema(), # Use Pydantic schema
-            options={'temperature': 0} # For more deterministic output
+            options={'temperature': 0, 'num_ctx': 2000} # For more deterministic output
         )
         response_text = response['message']['content']
         add_to_history('assistant', response_text)

@@ -3,14 +3,14 @@ import os
 import numpy as np
 import pyaudio
 import mlx_whisper # Restored mlx-whisper
-import threading # For non-blocking TTS if needed, though speak() is currently blocking
 import random # Added for random choice of acknowledgements
+import importlib
 
 # Import speak function from your tts_module
 from tts_module import initialize_tts, speak # Assuming tts_module.py is in the same directory or PYTHONPATH
 
 # Wake words
-WAKE_WORDS = ["robot", "guy", "toad", "spinny", "mauricio"] # Keep your desired wake words
+WAKE_WORDS = ["robot", "guy", "toad", "spinny", "mauricio", "maurices", "maurice", "mauricey", "maricio"] # Keep your desired wake words
 
 # Acknowledgement phrases
 ACKNOWLEDGEMENTS = ["Hey!", "What's up?", "What?", "Need something?", "Yes?", "I'm here.", "I'm listening."]
@@ -32,8 +32,8 @@ ASR_MODEL_NAME = "mlx-community/whisper-base.en-mlx"
 LANGUAGE = "en"
 
 # Transcription Quality Filters
-MAX_WORDS_PER_INTERVAL = 10  # Max plausible words for PROCESS_INTERVAL_SECONDS
-MAX_CHARS_PER_INTERVAL = 70  # Max plausible characters for PROCESS_INTERVAL_SECONDS
+MAX_WORDS_PER_INTERVAL = 15  # Max plausible words for PROCESS_INTERVAL_SECONDS
+MAX_CHARS_PER_INTERVAL = 75  # Max plausible characters for PROCESS_INTERVAL_SECONDS
 
 # IPC Flag File
 WAKE_WORD_FLAG_FILE = "WAKE_WORD_DETECTED.flag"
@@ -181,6 +181,7 @@ def listen_for_command(audio_stream, audio_interface_ref):
 
 def run_wakeword_server():
     global server_running
+    consecutive_filtered_wake_word_checks = 0
 
     if not initialize_tts():
         print("Failed to initialize TTS. Wakeword server might not speak.")
@@ -245,8 +246,22 @@ def run_wakeword_server():
                                 passes_length_check = False
                             
                             if passes_length_check:
+                                consecutive_filtered_wake_word_checks = 0
                                 valid_transcription_for_wakeword = True
                                 print(f"Wakeword check: '{raw_transcribed_text}'")
+                            else:
+                                consecutive_filtered_wake_word_checks += 1
+                        else:
+                            consecutive_filtered_wake_word_checks = 0
+
+                        if consecutive_filtered_wake_word_checks >= 3:
+                            print("Model produced filtered results 3 times in a row. Restarting model by reloading module...")
+                            try:
+                                importlib.reload(mlx_whisper)
+                                print("mlx_whisper module reloaded.")
+                            except Exception as e:
+                                print(f"Failed to reload mlx_whisper: {e}")
+                            consecutive_filtered_wake_word_checks = 0 # Reset after reloading
                         
                         if valid_transcription_for_wakeword:
                             transcribed_text_lower = raw_transcribed_text.lower()

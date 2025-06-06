@@ -41,6 +41,7 @@ previous_robot_data = None # To store the last complete robot data packet
 last_llm_decision = None # To store the last decision from the LLM
 last_action_description_for_llm = None # To store a description of the last action for the LLM context
 current_directive = "Explore the environment, describe what you see, and await further instructions." # Initial directive
+autonomous_nav_start_time = None # To time autonomous navigation sessions
 
 def cleanup_and_exit(sig=None, frame=None):
     """Gracefully close the serial port and exit."""
@@ -142,7 +143,7 @@ def initialize_systems():
 
 # --- Main Application Logic ---
 def main_loop():
-    global ser, current_robot_state, previous_robot_data, last_llm_decision, current_directive, last_action_description_for_llm
+    global ser, current_robot_state, previous_robot_data, last_llm_decision, current_directive, last_action_description_for_llm, autonomous_nav_start_time
     
     print(f"\nStarting autonomous control loop. Initial state: {current_robot_state}")
     print("Press Ctrl+C to exit.")
@@ -154,9 +155,18 @@ def main_loop():
     last_data_print_time = time.time()
     last_wake_word_check_time = time.time()
     awaiting_speech_start_time = None # Timer for robot-requested speech
+    previous_state_for_cleanup = current_robot_state
 
     while True:
         try:
+            # --- State transition cleanup logic ---
+            # If we have just transitioned *out* of AUTONOMOUS_NAV, reset its timer.
+            if previous_state_for_cleanup == STATE_AUTONOMOUS_NAV and current_robot_state != STATE_AUTONOMOUS_NAV:
+                print("INFO: Exited autonomous navigation mode. Timer reset.")
+                autonomous_nav_start_time = None
+            
+            previous_state_for_cleanup = current_robot_state # Update for the next loop's comparison
+
             # --- Read Serial Data from ESP32 ---
             raw_line = None
             if ser and ser.in_waiting > 0:
@@ -212,22 +222,28 @@ def main_loop():
                 pass # Stay idle until an IPC event or other state change occurs
 
             elif current_robot_state == STATE_AUTONOMOUS_NAV:
+                # Check for autonomous navigation timeout
+                if autonomous_nav_start_time and (time.time() - autonomous_nav_start_time > 15.0):
+                    print("AUTONOMOUS_NAV: 15-second navigation limit reached. Stopping to survey.")
+                    robot_actions.stop_robot(ser)
+                    current_robot_state = STATE_SURVEY_MODE
+                    last_action_description_for_llm = "I moved forward for 15 seconds and am now stopping to survey the area."
+                    continue # Restart loop to immediately handle the new state
+
                 if previous_robot_data:
                     # Check for critical stop condition triggered by ESP32's TOF logic
-                    # ESP32's CurrentSpeed becomes 0 when it stops due to obstacle (and PID was active)
-                    # We need to ensure this wasn't a manual 'x' stop or PID toggle.
-                    # This logic assumes ESP32 sets CurSpeed to 0 when its internal avoidance stops it.
-                    if previous_robot_data["CurSpeed"] == 0 and previous_robot_data.get("PID_Active_ESP", True):
-                        # How to differentiate from a manual 'x' command or 'p' toggle from Python side?
-                        # For now, assume if Python didn't just send 'x' or 'p', and CurSpeed is 0, ESP32 stopped itself.
-                        # This needs robust check. Let's assume for now this is the ESP32's autonomous stop.
-                        print("State AUTONOMOUS_NAV: ESP32 reported CurSpeed = 0. Obstacle detected by ESP32.")
-                        current_robot_state = STATE_CRITICAL_OBSTACLE_HANDLER
+                    # A 1-second grace period is given after entering AUTONOMOUS_NAV to avoid a false positive
+                    # where the robot reports CurSpeed=0 before it has had time to start moving.
+                    if autonomous_nav_start_time and (time.time() - autonomous_nav_start_time > 1.0):
+                        if previous_robot_data["CurSpeed"] == 0 and previous_robot_data.get("PID_Active_ESP", True):
+                            # This logic assumes ESP32 sets CurSpeed to 0 when its internal avoidance stops it.
+                            print("State AUTONOMOUS_NAV: ESP32 reported CurSpeed = 0 after grace period. Obstacle detected by ESP32.")
+                            current_robot_state = STATE_CRITICAL_OBSTACLE_HANDLER
                 # If wake word detected, state will change via IPC check above.
 
             elif current_robot_state == STATE_CRITICAL_OBSTACLE_HANDLER:
                 print("State CRITICAL_OBSTACLE_HANDLER: Initiating backup and survey.")
-                robot_actions.backup_robot(ser, duration_seconds=1.5)
+                robot_actions.backup_robot(ser, duration_seconds=2.5)
                 # backup_robot already sends a stop command after backup.
                 current_robot_state = STATE_SURVEY_MODE
                 # Clear any pending LLM decision from a previous cycle if any
@@ -239,7 +255,7 @@ def main_loop():
                 descriptions = {"front": "Error during front view", "left": "Error during left view", "right": "Error during right view"}
 
                 # 1. Front View
-                tts_module.speak("Looking around")
+                # tts_module.speak("Looking around")
                 img_front = vision_module.capture_image()
                 if img_front:
                     res_front = vision_module.analyze_image(img_front, prompt="Describe the scene in 3 sentences.")
@@ -250,7 +266,7 @@ def main_loop():
 
                 # 2. Left View
                 # tts_module.speak("Now, to my left.")
-                robot_actions.turn_robot(ser, 'left', duration_seconds=2.0)
+                robot_actions.turn_robot(ser, 'left', duration_seconds=0.5)
                 img_left = vision_module.capture_image()
                 if img_left:
                     res_left = vision_module.analyze_image(img_left, prompt="Describe the scene in 3 sentences.")
@@ -261,7 +277,7 @@ def main_loop():
 
                 # 3. Right View 
                 # tts_module.speak("And finally, to my right.")
-                robot_actions.turn_robot(ser, 'right', duration_seconds=4) # Turn right
+                robot_actions.turn_robot(ser, 'right', duration_seconds=1) # Turn right
                 img_right = vision_module.capture_image()
                 if img_right:
                     res_right = vision_module.analyze_image(img_right, prompt="Describe the scene in 3 sentences.")
@@ -272,7 +288,7 @@ def main_loop():
                 
                 # Return to roughly center (optional, or let LLM decide next turn)
                 # tts_module.speak("Okay, I've had a good look around.")
-                robot_actions.turn_robot(ser, 'left', duration_seconds=2) # Attempt to re-center
+                robot_actions.turn_robot(ser, 'left', duration_seconds=0.4) # Attempt to re-center
                 robot_actions.stop_robot(ser)
 
                 print("State SURVEY_MODE: Survey complete. Requesting LLM decision.")
@@ -308,7 +324,7 @@ def main_loop():
                     # The formatted_command in autonomous_control.py was already quite good at providing context.
                     # thinking_module.get_decision_for_user_command also appends its own directive context.
                     # We'll let thinking_module handle adding its internal directive to the prompt for consistency.
-                    formatted_command = f"A voice addressing you has said \"{user_speech_text}\". How do you respond?"
+                    formatted_command = f"A commanding voice addressing you has said \"{user_speech_text}\". How do you respond?"
                     print(f"Sending to LLM for user command: {formatted_command}")
                     last_llm_decision = thinking_module.get_decision_for_user_command(
                         formatted_command
@@ -340,7 +356,19 @@ def main_loop():
                 
                 survey_or_autonav_chosen_this_cycle = False # Flag for mutual exclusivity
 
-                actions_to_execute = list(last_llm_decision.keys())
+                # Define a priority for actions to resolve conflicts (e.g., stop vs. other movements)
+                # and ensure important context changes happen first (e.g., change_directive).
+                action_priority = [
+                    "change_directive",
+                    "speak",
+                    "turn_left",
+                    "turn_right",
+                    "move_forward_autonomously",
+                    "dance",
+                    "stop",
+                    "survey",
+                ]
+                actions_to_execute = [action for action in action_priority if action in last_llm_decision]
 
                 for action_key in actions_to_execute:
                     action_value = last_llm_decision.get(action_key)
@@ -372,7 +400,7 @@ def main_loop():
                             current_robot_state = STATE_SURVEY_MODE
                             action_sets_specific_next_state = True
                             any_action_other_than_speak_or_directive_change = True
-                            last_action_description_for_llm = "I am initiating a survey based on LLM request."
+                            last_action_description_for_llm = "I am initiating a survey."
                             survey_or_autonav_chosen_this_cycle = True
                             break 
                         else:
@@ -383,6 +411,7 @@ def main_loop():
                             print("LLM Command: Move Forward Autonomously")
                             robot_actions.set_autonomous_mode(ser, True)
                             current_robot_state = STATE_AUTONOMOUS_NAV
+                            autonomous_nav_start_time = time.time() # Start the 10-second timer
                             action_sets_specific_next_state = True
                             any_action_other_than_speak_or_directive_change = True
                             last_action_description_for_llm = "I am now moving forward autonomously."
@@ -393,13 +422,13 @@ def main_loop():
 
                     elif action_key == "turn_left" and action_value is True:
                         print("LLM Command: Turn Left")
-                        robot_actions.turn_robot(ser, 'left', 1.0)
+                        robot_actions.turn_robot(ser, 'left', 0.5)
                         any_action_other_than_speak_or_directive_change = True
                         last_action_description_for_llm = "I just turned left."
                         next_state_after_actions = STATE_SURVEY_MODE
                     elif action_key == "turn_right" and action_value is True:
                         print("LLM Command: Turn Right")
-                        robot_actions.turn_robot(ser, 'right', 1.0)
+                        robot_actions.turn_robot(ser, 'right', 0.5)
                         any_action_other_than_speak_or_directive_change = True
                         last_action_description_for_llm = "I just turned right."
                         next_state_after_actions = STATE_SURVEY_MODE

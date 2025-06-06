@@ -25,11 +25,11 @@ VL53L0X sensorR90; // Right 90 degrees on TCA Channel 3
 
 // PID Variables
 double Setpoint, Input, Output;
-double Kp = 45, Ki = 0, Kd = 14; // PID gains - Increased Kp for more drastic turns, adjusted Kd
+double Kp = 50, Ki = 1, Kd = 20; // PID gains - Increased Kp for more drastic turns, adjusted Kd
 PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 
 int baseSpeed = 180; // Default base speed (0-255)
-const int MIN_DISTANCE = 40; // Minimum distance to obstacle in cm (approx 8 inches) - Increased from 14
+const int MIN_DISTANCE = 50; // Minimum distance to obstacle in cm (approx 8 inches) - Increased from 14
 bool pid_active = true; // Flag to enable/disable PID control
 
 void setup() {

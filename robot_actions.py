@@ -93,13 +93,13 @@ def dance_silly(ser):
     # Wiggle
     print("Action: Wiggle wiggle!")
     send_command_to_robot(ser, 'a') # Turn left briefly
-    time.sleep(0.3)
+    time.sleep(0.5)
     send_command_to_robot(ser, 'd') # Turn right briefly
-    time.sleep(0.3)
+    time.sleep(0.5)
     send_command_to_robot(ser, 'a') # Turn left briefly
-    time.sleep(0.3)
+    time.sleep(0.5)
     send_command_to_robot(ser, 'd') # Turn right briefly
-    time.sleep(0.3)
+    time.sleep(0.5)
     send_command_to_robot(ser, 'x') # Stop wiggle
     
     print("Action: Dance complete.")
