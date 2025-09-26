@@ -1,6 +1,6 @@
 import ollama
 import json
-from pydantic import BaseModel # Removed Optional
+from pydantic import BaseModel
 
 MODEL_NAME = 'gemma3' # Or your preferred Ollama model for this task
 MAX_CONVERSATION_HISTORY = 20 # Max user/assistant turn pairs
@@ -17,11 +17,11 @@ class RobotActionResponse(BaseModel):
     change_directive: str | None = None
 
 # Default directive
-current_directive = "Look for a new objective"
+current_directive = "move to find a new objective"
 
 def get_system_prompt():
     # Dynamically create the system prompt with the current directive
-    return f"""You are a persistent, sassy, slay, boy named Mauricio. Current directive: {{current_directive}}.
+    return f"""You are an sassy, slay, boy named Mauricio. Current directive: {{current_directive}}.
     If you complete the directive, set next directive to: Look for a new objective.
     You MUST respond using the provided JSON schema. ALL actions, including movements, surveys, dances, stops, and directive changes, MUST be specified using their dedicated JSON keys.
     Order keys by intended execution sequence. Only use defined keys.
@@ -31,7 +31,7 @@ def get_system_prompt():
     - "turn_right": boolean (true to turn right)
     - "turn_left": boolean (true to turn left)
     - "move_forward_autonomously": boolean (true to move forward autonomously and survey. You like doing this!)
-    - "stop": boolean (true to stop all movement)
+
     - "survey": boolean (true to perform a visual survey)
     - "dance": boolean (true to perform a dance)
     - "change_directive": string (the new directive text; use this key if you decide to change your directive)

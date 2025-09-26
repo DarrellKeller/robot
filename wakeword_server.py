@@ -21,7 +21,7 @@ CHANNELS = 1
 RATE = 16000  # Whisper model expects 16kHz
 CHUNK_DURATION_MS = 250
 CHUNK_SAMPLES = int(RATE * CHUNK_DURATION_MS / 1000)
-PROCESS_INTERVAL_SECONDS = 1.0 # Duration of audio segment processed for wake words
+PROCESS_INTERVAL_SECONDS = 2.0 # Duration of audio segment processed for wake words
 PROCESS_SAMPLES = int(RATE * PROCESS_INTERVAL_SECONDS)
 
 # VAD Settings
@@ -35,10 +35,11 @@ LANGUAGE = "en"
 MAX_WORDS_PER_INTERVAL = 15  # Max plausible words for PROCESS_INTERVAL_SECONDS
 MAX_CHARS_PER_INTERVAL = 75  # Max plausible characters for PROCESS_INTERVAL_SECONDS
 
-# IPC Flag File
-WAKE_WORD_FLAG_FILE = "WAKE_WORD_DETECTED.flag"
-LISTENING_COMPLETE_FLAG_FILE = "LISTENING_COMPLETE.flag"
-USER_SPEECH_FILE = "user_speech.txt"
+# IPC Flag Files - Using absolute paths to ensure consistency
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+WAKE_WORD_FLAG_FILE = os.path.join(SCRIPT_DIR, "WAKE_WORD_DETECTED.flag")
+LISTENING_COMPLETE_FLAG_FILE = os.path.join(SCRIPT_DIR, "LISTENING_COMPLETE.flag")
+USER_SPEECH_FILE = os.path.join(SCRIPT_DIR, "user_speech.txt")
 
 # Global variable to control the main listening loop of the server
 server_running = True

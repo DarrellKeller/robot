@@ -18,10 +18,11 @@ BAUD_RATE = 115200
 DATA_TIMEOUT = 1.0  # Seconds to wait for serial data
 EXPECTED_COLUMNS = 17 # Increased from 16 to accommodate PID_Active_ESP
 
-# IPC Flag Files (must match wakeword_server.py)
-WAKE_WORD_FLAG_FILE = "WAKE_WORD_DETECTED.flag"
-LISTENING_COMPLETE_FLAG_FILE = "LISTENING_COMPLETE.flag"
-USER_SPEECH_FILE = "user_speech.txt"
+# IPC Flag Files - Using absolute paths to ensure consistency
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+WAKE_WORD_FLAG_FILE = os.path.join(SCRIPT_DIR, "WAKE_WORD_DETECTED.flag")
+LISTENING_COMPLETE_FLAG_FILE = os.path.join(SCRIPT_DIR, "LISTENING_COMPLETE.flag")
+USER_SPEECH_FILE = os.path.join(SCRIPT_DIR, "user_speech.txt")
 # REQUEST_AUDIO_CAPTURE_FLAG = "REQUEST_AUDIO_CAPTURE.flag" # New flag for robot-initiated listening -- REMOVED
 
 # Global serial object
@@ -191,27 +192,51 @@ def main_loop():
             
             # --- IPC: Check for Wake Word Server Signals ---
             if time.time() - last_wake_word_check_time > 0.25: # Check every 250ms
+                # Priority 1: A fully transcribed command is ready. This should interrupt almost anything.
                 if os.path.exists(LISTENING_COMPLETE_FLAG_FILE):
                     print("IPC: LISTENING_COMPLETE_FLAG_FILE detected.")
-                    if current_robot_state not in [STATE_AWAITING_LLM_DECISION, STATE_EXECUTING_LLM_DECISION]: # Avoid interrupting critical LLM tasks
-                        robot_actions.stop_robot(ser) # Stop robot movement
+                    if current_robot_state != STATE_PROCESSING_USER_COMMAND: # Avoid re-entry if we're already processing.
+                        print(f"IPC: User command received. Interrupting state '{current_robot_state}' to process.")
+                        robot_actions.stop_robot(ser) # Ensure robot is stopped
+                        if ser and ser.is_open: ser.reset_input_buffer() # Clear any stale serial data after stop
+                        last_llm_decision = None # Clear any pending LLM actions from the interrupted state
                         current_robot_state = STATE_PROCESSING_USER_COMMAND
+                        # No 'continue' here, we want to fall through to the STATE_PROCESSING_USER_COMMAND logic below in this same loop iteration.
                     else:
-                        print(f"IPC: In state {current_robot_state}, deferring user command processing.")
-                    # Flag will be cleared after processing the command
+                        # This case is unlikely but good to handle. It means a new command arrived while the old one was still being processed.
+                        print("IPC: Already in STATE_PROCESSING_USER_COMMAND. Ignoring new command to avoid conflict.")
+                        # We must clear the flags to prevent an infinite loop.
+                        clear_flag_file(LISTENING_COMPLETE_FLAG_FILE)
+                        if os.path.exists(USER_SPEECH_FILE):
+                           try: os.remove(USER_SPEECH_FILE)
+                           except OSError: pass
 
+                # Priority 2: The wake word was just heard. This is an immediate "stop and listen" signal.
                 elif os.path.exists(WAKE_WORD_FLAG_FILE):
-                    print("IPC: WAKE_WORD_FLAG_FILE detected.")
-                    if current_robot_state not in [STATE_AWAITING_LLM_DECISION, STATE_EXECUTING_LLM_DECISION, STATE_PROCESSING_USER_COMMAND, STATE_SURVEY_MODE, STATE_CRITICAL_OBSTACLE_HANDLER]:
-                        print("IPC: Wake word acknowledged. Robot stopping. Server is now listening for command.")
-                        robot_actions.stop_robot(ser) # Stop the robot
-                        current_robot_state = STATE_IDLE # Or a new state like AWAITING_USER_SPEECH
+                    print("IPC: WAKE_WORD_FLAG_FILE detected. This is an immediate interrupt.")
+                    # Per user request, wake word should interrupt almost any state.
+                    # The only state we don't want to interrupt is one that's already processing a command from a previous wake word.
+                    if current_robot_state != STATE_PROCESSING_USER_COMMAND:
+                        print(f"IPC: Interrupting state '{current_robot_state}'. Stopping robot and returning to IDLE while listening occurs.")
+                        robot_actions.stop_robot(ser) # Immediately stop all movement.
+                        if ser and ser.is_open: ser.reset_input_buffer() # Clear any stale serial data after stop
+
+                        # We can't easily interrupt a blocking `speak()` or `analyze_image()` call,
+                        # but we can prevent subsequent actions and change state.
+
+                        current_robot_state = STATE_IDLE
+                        last_action_description_for_llm = "I was interrupted by the user speaking my wake word." # Provide context for next LLM call
+                        last_llm_decision = None # Clear any pending decisions from the interrupted state
+
+                        clear_flag_file(WAKE_WORD_FLAG_FILE) # Important to clear it after handling.
+
+                        # By setting state to IDLE and continuing, we break the current flow of execution (e.g., a survey sequence).
+                        # The loop will then idle and wait for the LISTENING_COMPLETE_FLAG_FILE.
+                        continue # Restart the main loop to be in a clean IDLE state.
                     else:
-                        print(f"IPC: In state {current_robot_state}, wake word ignored by main brain for now.")
-                    # Wakeword server clears its own WAKE_WORD_FLAG_FILE after starting to listen for command.
-                    # Or we can clear it here if the server logic changes.
-                    # For now, assume server handles it.
-                    clear_flag_file(WAKE_WORD_FLAG_FILE) # Main brain now clears the flag
+                        print(f"IPC: In state {current_robot_state}, which is already handling a user command. Ignoring new wake word signal.")
+                        clear_flag_file(WAKE_WORD_FLAG_FILE) # Clear it anyway to prevent re-triggering.
+                
                 last_wake_word_check_time = time.time()
 
             # --- Robot State Machine ---
@@ -326,10 +351,14 @@ def main_loop():
                     # We'll let thinking_module handle adding its internal directive to the prompt for consistency.
                     formatted_command = f"A commanding voice addressing you has said \"{user_speech_text}\". How do you respond?"
                     print(f"Sending to LLM for user command: {formatted_command}")
+                    
+                    print("Waiting for response from thinking_module...")
                     last_llm_decision = thinking_module.get_decision_for_user_command(
                         formatted_command
                         # current_directive=current_directive # REMOVE: thinking_module manages its own directive
                     )
+                    print(f"Received response from thinking_module: {last_llm_decision}")
+
                     current_robot_state = STATE_EXECUTING_LLM_DECISION
                 else:
                     print("User speech was empty.")
@@ -337,9 +366,16 @@ def main_loop():
                     current_robot_state = STATE_IDLE
                 
                 clear_flag_file(LISTENING_COMPLETE_FLAG_FILE) # Always clear the flag after attempting to process
+                continue
             
             elif current_robot_state == STATE_EXECUTING_LLM_DECISION:
-                print(f"State EXECUTING_LLM_DECISION: Processing decision: {json.dumps(last_llm_decision, indent=2)}")
+                decision_str = "Invalid/Empty Decision"
+                try:
+                    decision_str = json.dumps(last_llm_decision, indent=2)
+                except Exception as json_e:
+                    decision_str = f"Could not serialize decision to JSON: {json_e}. Decision was: {last_llm_decision}"
+                print(f"State EXECUTING_LLM_DECISION: Processing decision: {decision_str}")
+
                 if not last_llm_decision or last_llm_decision.get('error'): # More robust check for error
                     speak_message = "I had a problem with my thinking process. I'll just stop for now."
                     if last_llm_decision and last_llm_decision.get("speak"): # Check if last_llm_decision is not None before .get()
@@ -446,6 +482,14 @@ def main_loop():
                 if not action_sets_specific_next_state: 
                     if any_action_other_than_speak_or_directive_change:
                         print(f"Discrete actions completed. Transitioning to {next_state_after_actions}.")
+                        # After manual actions (turn, dance), the ESP32's PID is off and it stops sending data.
+                        # We must re-enable it to resume the data stream, which prevents the main loop from hanging
+                        # on the serial read. The robot won't move because its speed is zero.
+                        print("Re-enabling ESP32 data stream before proceeding...")
+                        robot_actions.set_autonomous_mode(ser, True)
+                        time.sleep(0.1) # Brief pause for ESP32 to react
+                        if ser and ser.is_open: ser.reset_input_buffer() # Clear any old command echoes
+                        
                         current_robot_state = next_state_after_actions 
                     else:
                         print("No movement or major state-changing action from LLM. Going to IDLE.")

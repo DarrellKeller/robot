@@ -10,6 +10,55 @@ const int leftPWM = 19;      // GPIO19
 #include <Wire.h>
 #include <VL53L0X.h> // Using standard VL53L0X library
 #include <PID_v1.h>
+#include <math.h>
+
+// MPU-6050 (IMU) definitions
+const uint8_t MPU_ADDR = 0x68; // AD0 to GND keeps default address 0x68
+const int MPU_INT_PIN = 23;    // Data ready interrupt pin from MPU-6050
+
+// MPU-6050 registers
+const uint8_t MPU_REG_PWR_MGMT_1 = 0x6B;
+const uint8_t MPU_REG_SMPLRT_DIV = 0x19;
+const uint8_t MPU_REG_CONFIG = 0x1A;
+const uint8_t MPU_REG_GYRO_CONFIG = 0x1B;
+const uint8_t MPU_REG_ACCEL_CONFIG = 0x1C;
+const uint8_t MPU_REG_INT_PIN_CFG = 0x37;
+const uint8_t MPU_REG_INT_ENABLE = 0x38;
+const uint8_t MPU_REG_INT_STATUS = 0x3A;
+const uint8_t MPU_REG_GYRO_XOUT_H = 0x43;
+const uint8_t MPU_REG_WHO_AM_I = 0x75;
+
+const float MPU_GYRO_SENS = 131.0f; // LSB per deg/s for ±250°/s range
+
+struct GyroState {
+  float headingDeg = 0.0f;          // Integrated heading relative to startup (degrees)
+  float rateDps = 0.0f;             // Latest angular velocity around Y axis (deg/s)
+  float bias = 0.0f;                // Gyro bias computed during calibration (raw units)
+  unsigned long lastUpdateMicros = 0;
+  bool initialized = false;
+  bool calibrated = false;
+};
+
+volatile bool imuDataReady = false;
+GyroState gyroState;
+bool imuReady = false;
+const char* imuModelName = "Unknown IMU";
+
+void IRAM_ATTR onImuDataReady() {
+  imuDataReady = true;
+}
+
+bool initializeIMU();
+void calibrateGyro(int samples = 1000);
+bool readGyroRaw(int16_t &gx, int16_t &gy, int16_t &gz);
+void updateGyro(bool force = false);
+float getHeadingDegrees();
+float normalizeAngle(float angle);
+float headingError(float target);
+bool turnDegrees(float degrees, int fastSpeed = 160, int slowSpeed = 110, float tolerance = 3.0f);
+void applyPivot(int direction, int speed);
+void zeroHeading();
+void pivotWithoutIMU(int direction, unsigned long durationMs, int speed);
 
 #define TCAADDR 0x70 // TCA9548A I2C multiplexer address
 
@@ -29,12 +78,15 @@ double Kp = 50, Ki = 1, Kd = 20; // PID gains - Increased Kp for more drastic tu
 PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 
 int baseSpeed = 180; // Default base speed (0-255)
-const int MIN_DISTANCE = 50; // Minimum distance to obstacle in cm (approx 8 inches) - Increased from 14
-bool pid_active = true; // Flag to enable/disable PID control
+const int MIN_DISTANCE = 30; // Minimum distance to obstacle in cm (approx 8 inches) - Increased from 14
+bool pid_active = false; // Flag to enable/disable PID control
 
 void setup() {
   Serial.begin(115200); // Increased baud rate
   Wire.begin(); // ESP32 default SDA=21, SCL=22
+
+  // Setup MPU interrupt pin
+  pinMode(MPU_INT_PIN, INPUT_PULLUP);
   
   // Set motor pins as outputs
   pinMode(rightForward, OUTPUT);
@@ -47,6 +99,17 @@ void setup() {
   // Initialize sensors
   setupSensors();
 
+  imuReady = initializeIMU();
+  if (imuReady) {
+    calibrateGyro();
+    zeroHeading();
+    attachInterrupt(digitalPinToInterrupt(MPU_INT_PIN), onImuDataReady, FALLING);
+    Serial.print(imuModelName);
+    Serial.println(" initialized and calibrated.");
+  } else {
+    Serial.println("Failed to initialize MPU-6050!");
+  }
+
   // PID setup
   Setpoint = 0; // Target for steering, 0 means balanced
   myPID.SetMode(AUTOMATIC);
@@ -57,6 +120,9 @@ void setup() {
 }
 
 void loop() {
+  if (imuReady) {
+    updateGyro();
+  }
   // Handle manual serial commands
   if (Serial.available() > 0) {
     char command = Serial.read();
@@ -170,6 +236,9 @@ void loop() {
 }
 
 void handleSerialCommand(char command) {
+  if (imuReady) {
+    updateGyro(true);
+  }
   switch(command) {
     case 'w':
       pid_active = false; // Disable PID for manual control
@@ -233,6 +302,15 @@ void moveMotors(int leftSpeed, int rightSpeed, bool turningRightHint) {
   analogWrite(rightPWM, constrain(rightSpeed, 0, 255));
 }
 
+void pivotWithoutIMU(int direction, unsigned long durationMs, int speed) {
+  unsigned long start = millis();
+  applyPivot(direction, speed);
+  while (millis() - start < durationMs) {
+    delay(5);
+  }
+  stopMotors();
+}
+
 // Manual control functions (will set motors directly, overriding PID if pid_active is false)
 void forward() {
   digitalWrite(rightForward, HIGH);
@@ -253,29 +331,23 @@ void reverse() {
 }
 
 void left_turn() {
-  digitalWrite(rightForward, HIGH);
-  digitalWrite(rightBackward, LOW);
-  digitalWrite(leftForward, LOW); // Option 1: Pivot - Left motor backward or stop
-  digitalWrite(leftBackward, LOW); // if using LOW, it stops. For tighter turn, could set leftBackward HIGH
-  analogWrite(rightPWM, baseSpeed); 
-  analogWrite(leftPWM, constrain(baseSpeed / 2, 0, 255)); // Slower on left, or 0 for pivot. Ensure it does not go below 0 if baseSpeed is low.
-                                                        // If baseSpeed/2 is too low for movement, it will just pivot on stopped wheel.
-                                                        // Consider setting a fixed turning speed or ensuring baseSpeed is high enough.
-                                                        // For now, if baseSpeed/2 < 80 and not 0, it might not turn as expected.
-                                                        // Let's ensure left still moves, even if slowly, or stops for pivot
-  // If pivoting (left motor stopped): analogWrite(leftPWM, 0);
-  // If gentle turn: analogWrite(leftPWM, constrain(baseSpeed / 2, 80, 255) if baseSpeed/2 > 0 else 0);
-  // For simplicity now, let's try a fixed slower speed or stop for the inner wheel
-  analogWrite(leftPWM, 0); // Pivot turn by default
+  if (imuReady) {
+    if (!turnDegrees(75.0f)) {
+      Serial.println("IMU turn (left) timed out.");
+    }
+    return;
+  }
+  pivotWithoutIMU(1, 550, constrain(baseSpeed, 100, 200));
 }
 
 void right_turn() {
-  digitalWrite(rightForward, LOW); // Option 1: Pivot - Right motor backward or stop
-  digitalWrite(rightBackward, LOW); // if using LOW, it stops. For tighter turn, could set rightBackward HIGH
-  digitalWrite(leftForward, HIGH);
-  digitalWrite(leftBackward, LOW);
-  analogWrite(rightPWM, 0); // Pivot turn by default
-  analogWrite(leftPWM, baseSpeed); 
+  if (imuReady) {
+    if (!turnDegrees(-75.0f)) {
+      Serial.println("IMU turn (right) timed out.");
+    }
+    return;
+  }
+  pivotWithoutIMU(-1, 550, constrain(baseSpeed, 100, 200));
 }
 
 // Function to select I2C channel on TCA9548A
@@ -313,3 +385,340 @@ void setupSensors() {
     // sensors[i]->setWindowSize(window); // Removed, not part of standard VL53L0X library
   }
 } 
+
+// -----------------------------
+// IMU helper implementations
+// -----------------------------
+
+bool initializeIMU() {
+  Wire.beginTransmission(MPU_ADDR);
+  uint8_t status = Wire.endTransmission();
+  if (status != 0) {
+    Serial.print("MPU: Address 0x68 not acknowledged. Status code: ");
+    Serial.println(status);
+    return false; // Device not found on bus
+  }
+
+  // Verify WHO_AM_I register
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(MPU_REG_WHO_AM_I);
+  status = Wire.endTransmission(false);
+  if (status != 0) {
+    Serial.print("MPU: Failed to write WHO_AM_I register. Status: ");
+    Serial.println(status);
+    return false;
+  }
+  Wire.requestFrom(MPU_ADDR, (uint8_t)1);
+  if (!Wire.available()) {
+    Serial.println("MPU: WHO_AM_I read returned no data.");
+    return false;
+  }
+  uint8_t whoami = Wire.read();
+  if (whoami == 0x68) {
+    imuModelName = "MPU-6050";
+  } else if (whoami == 0x70) {
+    imuModelName = "MPU-6500";
+  } else if (whoami == 0x71) {
+    imuModelName = "MPU-9250";
+  } else if (whoami == 0x72) {
+    imuModelName = "MPU-9255";
+  } else if (whoami == 0x98) {
+    imuModelName = "MPU-6480"; // Likely factory ID for some clones
+  } else {
+    Serial.print("IMU: Unexpected WHO_AM_I: 0x");
+    Serial.println(whoami, HEX);
+    return false;
+  }
+
+  // Reset the device
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(MPU_REG_PWR_MGMT_1);
+  Wire.write(0x80);
+  status = Wire.endTransmission();
+  if (status != 0) {
+    Serial.print("MPU: Failed to issue reset. Status: ");
+    Serial.println(status);
+    return false;
+  }
+  delay(100);
+
+  // Wake up and select PLL with X axis gyroscope reference
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(MPU_REG_PWR_MGMT_1);
+  Wire.write(0x01);
+  status = Wire.endTransmission();
+  if (status != 0) {
+    Serial.print("MPU: Failed to exit sleep. Status: ");
+    Serial.println(status);
+    return false;
+  }
+
+  // Sample rate divider -> 1kHz / (1 + 9) = 100 Hz
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(MPU_REG_SMPLRT_DIV);
+  Wire.write(9);
+  status = Wire.endTransmission();
+  if (status != 0) {
+    Serial.print("MPU: Failed to set sample rate. Status: ");
+    Serial.println(status);
+    return false;
+  }
+
+  // Configure DLPF (set to 0x03 -> ~44 Hz bandwidth)
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(MPU_REG_CONFIG);
+  Wire.write(0x03);
+  status = Wire.endTransmission();
+  if (status != 0) {
+    Serial.print("MPU: Failed to set DLPF. Status: ");
+    Serial.println(status);
+    return false;
+  }
+
+  // Gyro full scale ±250°/s
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(MPU_REG_GYRO_CONFIG);
+  Wire.write(0x00);
+  status = Wire.endTransmission();
+  if (status != 0) {
+    Serial.print("MPU: Failed to set gyro range. Status: ");
+    Serial.println(status);
+    return false;
+  }
+
+  // Accelerometer ±2g (default) - keep for completeness
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(MPU_REG_ACCEL_CONFIG);
+  Wire.write(0x00);
+  status = Wire.endTransmission();
+  if (status != 0) {
+    Serial.print("MPU: Failed to set accel range. Status: ");
+    Serial.println(status);
+    return false;
+  }
+
+  // Configure interrupt pin (active low, open drain, latch until read)
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(MPU_REG_INT_PIN_CFG);
+  Wire.write(0x10);
+  status = Wire.endTransmission();
+  if (status != 0) {
+    Serial.print("MPU: Failed to set INT pin config. Status: ");
+    Serial.println(status);
+    return false;
+  }
+
+  // Enable data ready interrupt
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(MPU_REG_INT_ENABLE);
+  Wire.write(0x01);
+  status = Wire.endTransmission();
+  if (status != 0) {
+    Serial.print("MPU: Failed to enable interrupt. Status: ");
+    Serial.println(status);
+    return false;
+  }
+
+  // Clear any pending interrupts by reading the status register
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(MPU_REG_INT_STATUS);
+  if (Wire.endTransmission(false) == 0) {
+    Wire.requestFrom(MPU_ADDR, (uint8_t)1);
+    if (Wire.available()) Wire.read();
+  }
+
+  gyroState.initialized = true;
+  gyroState.lastUpdateMicros = micros();
+  imuDataReady = false;
+  return true;
+}
+
+void calibrateGyro(int samples) {
+  if (!gyroState.initialized) return;
+
+  long sum = 0;
+  int16_t gx, gy, gz;
+  const int maxSamples = max(samples, 100);
+
+  // Allow sensor to settle
+  delay(50);
+
+  for (int i = 0; i < maxSamples; ++i) {
+    if (!readGyroRaw(gx, gy, gz)) {
+      delay(2);
+      --i;
+      continue;
+    }
+    sum += gy;
+    delay(2);
+  }
+
+  gyroState.bias = sum / (float)maxSamples;
+  gyroState.calibrated = true;
+  gyroState.lastUpdateMicros = micros();
+  imuDataReady = false;
+}
+
+bool readGyroRaw(int16_t &gx, int16_t &gy, int16_t &gz) {
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(MPU_REG_GYRO_XOUT_H);
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+
+  Wire.requestFrom(MPU_ADDR, (uint8_t)6);
+  if (Wire.available() < 6) {
+    return false;
+  }
+
+  int16_t rawX = (Wire.read() << 8) | Wire.read();
+  int16_t rawY = (Wire.read() << 8) | Wire.read();
+  int16_t rawZ = (Wire.read() << 8) | Wire.read();
+
+  gx = rawX;
+  gy = rawY;
+  gz = rawZ;
+  return true;
+}
+
+void updateGyro(bool force) {
+  if (!imuReady) return;
+  if (!imuDataReady && !force) return;
+
+  int16_t gx, gy, gz;
+  if (!readGyroRaw(gx, gy, gz)) {
+    return;
+  }
+
+  imuDataReady = false;
+
+  unsigned long now = micros();
+  if (gyroState.lastUpdateMicros == 0) {
+    gyroState.lastUpdateMicros = now;
+    return;
+  }
+
+  float dt = (now - gyroState.lastUpdateMicros) / 1000000.0f;
+  gyroState.lastUpdateMicros = now;
+
+  float gyroY = (gy - gyroState.bias) / MPU_GYRO_SENS;
+  gyroState.rateDps = gyroY;
+  gyroState.headingDeg += gyroY * dt;
+  gyroState.headingDeg = normalizeAngle(gyroState.headingDeg);
+}
+
+float getHeadingDegrees() {
+  return gyroState.headingDeg;
+}
+
+float normalizeAngle(float angle) {
+  while (angle > 180.0f) angle -= 360.0f;
+  while (angle < -180.0f) angle += 360.0f;
+  return angle;
+}
+
+void applyPivot(int direction, int speed) {
+  speed = constrain(speed, 0, 255);
+  if (direction >= 0) { // Positive -> left turn
+    digitalWrite(rightForward, HIGH);
+    digitalWrite(rightBackward, LOW);
+    digitalWrite(leftForward, LOW);
+    digitalWrite(leftBackward, HIGH);
+  } else { // Negative -> right turn
+    digitalWrite(rightForward, LOW);
+    digitalWrite(rightBackward, HIGH);
+    digitalWrite(leftForward, HIGH);
+    digitalWrite(leftBackward, LOW);
+  }
+  analogWrite(rightPWM, speed);
+  analogWrite(leftPWM, speed);
+}
+
+void zeroHeading() {
+  gyroState.headingDeg = 0.0f;
+  gyroState.lastUpdateMicros = micros();
+}
+
+float headingError(float target) {
+  float diff = target - gyroState.headingDeg;
+  return normalizeAngle(diff);
+}
+
+bool turnDegrees(float degrees, int fastSpeed, int slowSpeed, float tolerance) {
+  if (!imuReady || !gyroState.calibrated) {
+    return false;
+  }
+
+  int direction = (degrees >= 0.0f) ? 1 : -1;
+  fastSpeed = constrain(fastSpeed, 80, 255);
+  slowSpeed = constrain(slowSpeed, 60, fastSpeed - 5);
+  float target = degrees;
+  float absTarget = fabs(target);
+
+  zeroHeading();
+  imuDataReady = false;
+
+  unsigned long startTime = millis();
+  unsigned long timeout = max(3000UL, (unsigned long)(fabs(degrees) * 28.0f));
+
+  uint8_t stage = 0; // 0 = soft start, 1 = medium push, 2 = high torque
+
+  while (millis() - startTime < timeout) {
+    updateGyro();
+
+    float error = headingError(target);
+    float absError = fabs(error);
+    float absHeading = fabs(gyroState.headingDeg);
+
+    if (absError <= tolerance) {
+      stopMotors();
+      return true;
+    }
+
+    if (stage == 0 && (absHeading >= absTarget * 0.45f || millis() - startTime > 500)) {
+      stage = 1;
+    }
+    if (stage == 1 && (absHeading >= absTarget * 0.85f || millis() - startTime > 1500)) {
+      stage = 2;
+    }
+
+    int speed;
+    unsigned long pulseOn;
+    unsigned long pulsePause;
+
+    if (stage == 0) {
+      speed = max(slowSpeed - 5, 95);
+      pulseOn = 18;
+      pulsePause = 14;
+    } else if (stage == 1) {
+      speed = max(slowSpeed + 30, 120);
+      pulseOn = 20;
+      pulsePause = 10;
+    } else {
+      speed = min(max(fastSpeed + 50, slowSpeed + 50), 240);
+      pulseOn = 22;
+      pulsePause = 10;
+    }
+
+    if (absError < 18.0f) {
+      speed = max(speed - 10, 100);
+      pulseOn = max(pulseOn - 3, (unsigned long)12);
+      pulsePause += 4;
+    }
+    if (absError < 8.0f) {
+      speed = max(speed - 20, 80);
+      pulseOn = max(pulseOn - 4, (unsigned long)8);
+      pulsePause += 6;
+    }
+
+    applyPivot(direction, speed);
+    delay(pulseOn);
+    stopMotors();
+    delay(pulsePause);
+
+    updateGyro(true); // Force read after each pulse
+  }
+
+  stopMotors();
+  return false;
+}
