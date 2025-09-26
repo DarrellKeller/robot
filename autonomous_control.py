@@ -291,7 +291,7 @@ def main_loop():
 
                 # 2. Left View
                 # tts_module.speak("Now, to my left.")
-                robot_actions.turn_robot(ser, 'left', duration_seconds=0.5)
+                robot_actions.turn_robot(ser, 'left', angle_degrees=75.0)
                 img_left = vision_module.capture_image()
                 if img_left:
                     res_left = vision_module.analyze_image(img_left, prompt="Describe the scene in 3 sentences.")
@@ -302,7 +302,7 @@ def main_loop():
 
                 # 3. Right View 
                 # tts_module.speak("And finally, to my right.")
-                robot_actions.turn_robot(ser, 'right', duration_seconds=1) # Turn right
+                robot_actions.turn_robot(ser, 'right', angle_degrees=120.0) # slight extra for overshoot margin
                 img_right = vision_module.capture_image()
                 if img_right:
                     res_right = vision_module.analyze_image(img_right, prompt="Describe the scene in 3 sentences.")
@@ -313,7 +313,7 @@ def main_loop():
                 
                 # Return to roughly center (optional, or let LLM decide next turn)
                 # tts_module.speak("Okay, I've had a good look around.")
-                robot_actions.turn_robot(ser, 'left', duration_seconds=0.4) # Attempt to re-center
+                robot_actions.turn_robot(ser, 'left', angle_degrees=60.0) # Attempt to re-center
                 robot_actions.stop_robot(ser)
 
                 print("State SURVEY_MODE: Survey complete. Requesting LLM decision.")

@@ -1,4 +1,5 @@
 import time
+import math
 
 # This module assumes that a 'ser' (serial connection object)
 # is available and passed to its functions from the main control script.
@@ -26,28 +27,42 @@ def backup_robot(ser, duration_seconds=1.5):
     send_command_to_robot(ser, 'x') # 'x' to stop after backing up
     print("Action: Backup complete.")
 
-def turn_robot(ser, direction, duration_seconds):
-    """Commands the robot to turn left or right for a specified duration.
+DEFAULT_IMU_TURN_ANGLE = 75.0
 
-    Args:
-        ser: The initialized serial.Serial object.
-        direction: 'left' or 'right'.
-        duration_seconds: How long to execute the turn command.
-    """
-    command_char = ''
-    if direction == 'left':
-        command_char = 'a'
-    elif direction == 'right':
-        command_char = 'd'
-    else:
+
+def turn_robot(ser, direction, angle_degrees=DEFAULT_IMU_TURN_ANGLE, turn_speed_level=None):
+    """Commands the ESP32 to perform IMU-based turns in multiples of the default angle."""
+    if direction not in ('left', 'right'):
         print(f"Invalid turn direction: {direction}")
         return
 
-    print(f"Action: Turning {direction} for {duration_seconds} seconds.")
-    send_command_to_robot(ser, command_char)
-    time.sleep(duration_seconds)
-    send_command_to_robot(ser, 'x') # Stop turning
-    print(f"Action: Turn {direction} complete.")
+    if angle_degrees <= 0:
+        print("Angle must be positive for turn_robot.")
+        return
+
+    turns_needed = max(1, int(math.ceil(angle_degrees / DEFAULT_IMU_TURN_ANGLE)))
+    command_char = 'a' if direction == 'left' else 'd'
+
+    print(f"Action: Turning {direction} for {angle_degrees} degrees (approx {turns_needed} pulses).")
+
+    # Stop any current motion before initiating the turn
+    send_command_to_robot(ser, 'x')
+    time.sleep(0.15)
+
+    if turn_speed_level is not None:
+        set_robot_speed(ser, turn_speed_level)
+        time.sleep(0.1)
+
+    estimated_time_per_turn = 2.2  # seconds, tuned to IMU turn duration on ESP32
+
+    for i in range(turns_needed):
+        print(f"Action: Turn pulse {i+1}/{turns_needed} ({direction}).")
+        send_command_to_robot(ser, command_char)
+        time.sleep(estimated_time_per_turn)
+        send_command_to_robot(ser, 'x')
+        time.sleep(0.2)
+
+    print("Action: Turn sequence complete.")
 
 def stop_robot(ser):
     """Commands the robot to stop all motor functions."""
