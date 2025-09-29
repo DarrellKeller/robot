@@ -30,6 +30,38 @@ def backup_robot(ser, duration_seconds=1.5):
 DEFAULT_IMU_TURN_ANGLE = 75.0
 
 
+def _wait_for_turn_completion(ser, timeout=6.0):
+    if not ser or not ser.is_open:
+        return False
+    try:
+        old_timeout = ser.timeout
+    except AttributeError:
+        old_timeout = None
+    try:
+        if hasattr(ser, "reset_input_buffer"):
+            ser.reset_input_buffer()
+        ser.timeout = 0  # Non-blocking
+    except Exception:
+        pass
+    buffer = b""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        data = ser.read(ser.in_waiting or 1)
+        if data:
+            buffer += data
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                line_decoded = line.decode(errors='ignore').strip()
+                if line_decoded.startswith("TURN_STATUS"):
+                    if old_timeout is not None:
+                        ser.timeout = old_timeout
+                    return True
+        time.sleep(0.05)
+    if old_timeout is not None:
+        ser.timeout = old_timeout
+    return False
+
+
 def turn_robot(ser, direction, angle_degrees=DEFAULT_IMU_TURN_ANGLE, turn_speed_level=None):
     """Commands the ESP32 to perform IMU-based turns in multiples of the default angle."""
     if direction not in ('left', 'right'):
@@ -58,7 +90,10 @@ def turn_robot(ser, direction, angle_degrees=DEFAULT_IMU_TURN_ANGLE, turn_speed_
     for i in range(turns_needed):
         print(f"Action: Turn pulse {i+1}/{turns_needed} ({direction}).")
         send_command_to_robot(ser, command_char)
-        time.sleep(estimated_time_per_turn)
+        completed = _wait_for_turn_completion(ser, timeout=estimated_time_per_turn + 1.0)
+        if not completed:
+            print("Warning: No TURN_STATUS received, forcing stop.")
+            time.sleep(estimated_time_per_turn)
         send_command_to_robot(ser, 'x')
         time.sleep(0.2)
 

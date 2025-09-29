@@ -59,6 +59,7 @@ bool turnDegrees(float degrees, int fastSpeed = 160, int slowSpeed = 110, float 
 void applyPivot(int direction, int speed);
 void zeroHeading();
 void pivotWithoutIMU(int direction, unsigned long durationMs, int speed);
+void sendTurnStatus(const char* direction, const char* status);
 
 #define TCAADDR 0x70 // TCA9548A I2C multiplexer address
 
@@ -309,6 +310,14 @@ void pivotWithoutIMU(int direction, unsigned long durationMs, int speed) {
     delay(5);
   }
   stopMotors();
+  sendTurnStatus(direction >= 0 ? "left" : "right", "no-imu");
+}
+
+void sendTurnStatus(const char* direction, const char* status) {
+  Serial.print("TURN_STATUS:");
+  Serial.print(direction);
+  Serial.print(',');
+  Serial.println(status);
 }
 
 // Manual control functions (will set motors directly, overriding PID if pid_active is false)
@@ -337,7 +346,7 @@ void left_turn() {
     }
     return;
   }
-  pivotWithoutIMU(1, 550, constrain(baseSpeed, 100, 200));
+
 }
 
 void right_turn() {
@@ -347,7 +356,7 @@ void right_turn() {
     }
     return;
   }
-  pivotWithoutIMU(-1, 550, constrain(baseSpeed, 100, 200));
+
 }
 
 // Function to select I2C channel on TCA9548A
@@ -672,6 +681,7 @@ bool turnDegrees(float degrees, int fastSpeed, int slowSpeed, float tolerance) {
 
     if (absError <= tolerance) {
       stopMotors();
+      sendTurnStatus(direction > 0 ? "left" : "right", "done");
       return true;
     }
 
@@ -720,5 +730,6 @@ bool turnDegrees(float degrees, int fastSpeed, int slowSpeed, float tolerance) {
   }
 
   stopMotors();
+  sendTurnStatus(direction > 0 ? "left" : "right", "timeout");
   return false;
 }
