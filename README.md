@@ -1,220 +1,70 @@
-# Mauricio: Jev-controlled indoor robot
+# Mauricio
 
-Jev makes short, typed decisions from ToF, MPU heading, local vision, dialogue,
-subgoals and recent outcomes. Python owns execution and persistence. The ESP32
-owns motor output, continuous sensor acquisition, clearance checks and a command
-watchdog. LFM2.5-VL-450M supplies descriptions, speech text and proposed subgoals.
+An indoor robot using **Jev** for typed decisions, **LFM2.5-VL-450M** for local
+vision and language, **Whisper/Piper** for conversation, and an **ESP32** for
+motor control and continuous ToF/MPU feedback.
 
-## Architecture
+Movement, vision and speech run independently. Recovery uses the same Jev
+questions with recent outcomes as context. Code owns subgoals, persistence,
+command expiry and sensor checks.
 
-- `autonomous_control.py`: entry point; runs the Jev controller by default.
-- `jev_control.py`: independent decision, vision, audio and telemetry scheduling.
-- `jev_client.py`: TypeSafe HTTP client and the seven existing typed questions.
-- `robot_link.py`: single serial reader and protocol-v2 movement dispatch.
-- `mission_store.py`: atomic persistence of subgoals, dialogue, observed motion,
-  recovery outcomes and selected visual memories.
-- `lfm_tools.py`: resident MLX model, bounded priority queue and persistent camera.
-- `audio_controller.py`: sole microphone/playback owner, Whisper wake detection,
-  question/answer capture and Piper playback.
-- `motor_control/motor_control.ino`: protocol-v2 ESP32 firmware.
-- `legacy_autonomous_control.py`: previous controller, preserved separately.
+## Getting started
 
-There is no exclusive `next_mode`. Movement, vision and speech can proceed
-independently. Speaking and microphone capture are mutually exclusive. A pending
-question holds motion until answered or listening times out.
-
-| Jev question | Type | Purpose |
-| --- | --- | --- |
-| `movement` | Choice | `forward`, `left`, `right`, `stop` |
-| `need_fresh_vision` | Noul | Gate an additional visual inspection |
-| `lfm_vision_tool` | Choice | Scene, goal search, person inspection, text reading |
-| `should_ask_person` | Noul | Request clarification or fulfill an asking step |
-| `lfm_speech_tool` | Choice | None, question, answer, update, celebration |
-| `goal_complete` | Noul | Completion evidence for the current subgoal |
-| `should_remember` | Noul | Retain the current observation as a sourced fact |
-
-Recovery adds no questions: recent attempts, interruption reasons, repeated
-failures and a step-overdue event become input to these same questions. Firmware
-sensor/clearance stops never depend on a model's answer.
-
-## Setup
-
-Install Python requirements in the project's environment:
+Install the dependencies in your Python environment:
 
 ```sh
 python -m pip install -r requirements.txt
 ```
 
-Create `.env` (ignored by Git):
-
-```dotenv
-JEV_API_KEY=your_key
-JEV_MODEL=jev-1.13.0
-```
-
-The version is pinned because model changes can affect calibrated thresholds.
-The client sends state and typed questions to `https://api.typesafe.ai/v1/systemone`.
-It does not retry an old physical snapshot; the loop backs off and submits fresh
-state after errors. Never put keys into tracked files or CLI arguments.
-
-Local models:
-
-- Vision, speech text and plan proposals: `mlx-community/LFM2.5-VL-450M-6bit`.
-- Whisper: `mlx-community/whisper-base.en-mlx`.
-- Piper: place `en_US-ryan-high.onnx` and its JSON config beside `tts_module.py`.
-
-Grant camera and microphone access to the terminal/app used to run Python.
-**Do not run `wakeword_server.py` alongside the Jev controller.** Audio is now
-owned by the controller itself. The old server remains for the legacy path.
-
-## Firmware compatibility
-
-Compile/upload `motor_control/motor_control.ino` for your ESP32 with the Pololu
-VL53L0X library. This firmware and the new controller must be deployed together.
-The host refuses movement without protocol-v2 telemetry. Old one-character
-movement commands cannot start motors on the new firmware; `x` still stops them.
-
-The existing wiring is retained: five ToF sensors at left 90°, left 45°, front,
-right 45°, right 90°, via TCA channels 7, 6, 5, 4, 3. Motor pins are unchanged.
-The gyro driver retains the existing MPU-6050-compatible register map and Y-axis
-rotation convention. It reports the detected model. **MPU-3050 compatibility has
-not been established**; verify the actual module and mounting before driving.
-No fabricated support or absolute compass heading is assumed.
-
-## Running
-
-Default is a dry run: **no serial port is opened and no motor commands are sent**.
-The camera, local models, audio and Jev API still operate unless disabled. Without
-sensor telemetry the only permitted movement is stop; dry run is not a simulator.
+Copy `.env.example` to `.env` **only if you do not already have a `.env`**, then
+set `JEV_API_KEY`. Keep the Piper voice model `en_US-ryan-high.onnx` and its JSON
+config at the repository root. Local MLX models download on first use.
 
 ```sh
-python autonomous_control.py --goal "Find the dining table, dance beside it, then ask whether people liked it."
+python autonomous_control.py --goal "Find the dining table"
 ```
 
-A live run requires an explicit flag and the matching firmware:
+The default is a **dry run with no serial connection**. Camera, audio and model
+calls still run. Use `--help` for options, including `--no-audio`, `--no-camera`,
+`--duration`, `--plan`, and `--resume`.
+
+Live operation requires the matching protocol-v2 firmware:
 
 ```sh
 python autonomous_control.py --live --port /dev/tty.usbserial-0001 --goal "Find the dining table"
 ```
 
-Other options:
+Do not run the legacy `wakeword_server.py` alongside the Jev controller; the new
+controller owns the microphone. Saved missions do not resume motion automatically.
 
-```sh
-python autonomous_control.py --help
-python autonomous_control.py --no-audio --no-camera --duration 10
-python autonomous_control.py --live --resume
-python autonomous_control.py --vision-hz 2
-```
+See the [controller guide](docs/jev-controller.md) for firmware wiring, model
+setup, voice interaction, planning, timing, protocol details and current limits.
+Hardware calibration and end-to-end robot trials remain to be done.
 
-Use a wake word such as “robot” or “Mauricio.” A command can follow the wake word
-in the same utterance, or the robot listens for a follow-up. After the robot asks
-a question, it listens automatically without requiring another wake word.
-“Stop,” “cancel,” “stop moving,” and “cancel task” stop and pause the task.
-“Resume” or “continue” explicitly resumes a retained plan. Voice capture does not
-interrupt TTS; Ctrl-C and the serial `x` stop are independent of audio.
+## Repository layout
 
-Active missions load paused on restart. Use `--resume` explicitly. Runtime state
-and bounded decision logs live under ignored `runtime/`; `--state PATH` selects
-another store. Decision logs include the sent state, answers and dispatched action.
-They can contain private dialogue and observations; keep them local.
+| Location | Contents |
+| --- | --- |
+| Root Python modules | Jev runtime and retained legacy modules |
+| `motor_control/` | ESP32 firmware |
+| `tests/` | Offline control-boundary checks |
+| `benchmarks/` | Vision, navigation and memory experiments |
+| `scripts/` | Benchmark launchers, including macOS Finder `.command` files |
+| `example_code/` | Standalone historical experiments; not the active controller |
+| `docs/` | Detailed controller documentation |
+| `runtime/` | Private mission state and decision logs; ignored by Git |
+| `benchmarks/results/` | Local reports and captured images; ignored by Git |
 
-## Goals and execution
-
-LFM proposes at most eight sequential subgoals with `kind`, `instruction` and
-`completion`. Kinds are `navigate`, `dance`, `talk`, `listen`. Code validates the
-schema; LFM never dispatches motors. Jev judges navigation completion; actual
-playback and captured answers govern talk/listen completion. Dance completion
-requires at least four seconds of reported pivot motion as well as Jev's
-completion judgment. Jev selects the individual pivots; no blocking dance macro
-runs behind it.
-
-Plan quality still needs task trials. To bypass generative planning, supply a
-reviewed JSON file with `--plan PATH`:
-
-```json
-{
-  "intent": "new_goal",
-  "steps": [
-    {
-      "kind": "navigate",
-      "instruction": "Find the dining table",
-      "completion": "The dining table is visible in a fresh observation"
-    },
-    {
-      "kind": "talk",
-      "instruction": "Tell the user that the table was found",
-      "completion": "The announcement finished playing"
-    }
-  ]
-}
-```
-
-Repeated identical movement segments are merged. Route entries distinguish
-reported motor activity from measured heading change: **translation is
-unmeasured**. Gyro heading is continuous relative to startup and can drift. These
-are useful breadcrumbs, not position localization or a reliable return route.
-Stored scene descriptions retain their source; they are model observations,
-not independently verified map facts.
-
-## Timing and command protocol
-
-Initial settings are deliberately explicit and need chassis testing:
-
-- Jev: up to 4 requests/second; one request in flight. Discard responses older
-  than 450 ms or belonging to an earlier goal/subgoal.
-- Vision: 1 observation/second by default, configurable up to 2. Explicit
-  inspections take priority over the next background job. One pending job per
-  kind prevents frame and speech backlogs; one model worker owns LFM inference.
-  LFM and Whisper serialize device inference; Jev and motor control remain independent.
-- Vision becomes stale after 2 seconds or 25° of heading change. Motion then
-  stops until a fresh view is available. Camera capture itself runs continuously.
-- Host: rechecks fresh sensors at dispatch; stops when telemetry is older than
-  250 ms. Stops after 500 ms without a usable decision.
-- Firmware: each motion lease is 600 ms; maximum accepted lease is 650 ms.
-  Renewing an action continues it smoothly. Expiry stops motors; it does not
-  grant permission to keep moving for an entire subgoal.
-- Firmware samples ready ToF measurements without waiting for a new range and
-  reports telemetry every 50 ms in every mode. Invalid/stale ranges are `null`,
-  never “clear.” MPU is polled throughout movement, including turns.
-- Motion requires five healthy ToF readings and a fresh calibrated MPU. Forward
-  checks the three forward-facing ranges; pivots check all five, at 300 mm.
-  Reverse is not exposed because rear coverage is absent. PWM defaults to 100.
-- Confidence settings (0.75 choices, 0.8 Nouls, 0.9 completion) are initial
-  policy settings, not empirically established reliability guarantees.
-
-Host command (newline terminated):
-
-```text
-M,42,left,600
-M,43,stop,600
-```
-
-Firmware telemetry (one JSON object per line):
-
-```json
-{"protocol":2,"uptime_ms":1000,"command_id":42,"motion":"left","stop_reason":"none","tof_mm":[900,900,900,900,900],"heading_deg":72.0,"yaw_rate_dps":20.0,"imu_valid":true,"imu_age_ms":5,"imu_model":"MPU-6050"}
-```
-
-## Validation and legacy code
-
-Offline control-boundary tests:
+## Development checks
 
 ```sh
 python -m unittest discover -s tests -v
 arduino-cli compile --fqbn esp32:esp32:esp32 motor_control
 ```
 
-These check software behavior/buildability, not physical braking, sensor coverage,
-turn direction, model judgment, conversational quality or sustained throughput.
-Live robot tests, PWM/clearance calibration and end-to-end task trials remain.
+These checks do not move or flash the robot. See [benchmarks](benchmarks/README.md)
+for model comparisons and [examples](example_code/README.md) for standalone tools.
 
-For the old controller, `python autonomous_control.py --legacy` runs the retained
-code. It requires the **old firmware** and the old separate wakeword server; it is
-not a compatibility mode for protocol v2. Older benchmark scripts and example
-programs remain separate from the Jev runtime.
-
-References: [TypeSafe architecture](https://docs.typesafe.ai/concepts/how-to-build-with-system-one),
-[parallel questions](https://docs.typesafe.ai/patterns/fan-out),
-[API](https://docs.typesafe.ai/api),
-[Jev limitations](https://docs.typesafe.ai/model-jaggedness/jev-1.13),
-[Pololu VL53L0X library](https://github.com/pololu/vl53l0x-arduino).
+The old controller is available through `python autonomous_control.py --legacy`.
+It requires the old firmware and separate wakeword server. It does not support
+protocol v2.

@@ -12,25 +12,25 @@ from mlx_vlm.utils import load_config
 def capture_image():
     # Initialize webcam
     cap = cv2.VideoCapture(0)
-    
+
     if not cap.isOpened():
         raise Exception("Could not open webcam")
-    
+
     # Capture frame
     ret, frame = cap.read()
-    
+
     if not ret:
         raise Exception("Failed to capture image")
-    
+
     # Release webcam
     cap.release()
-    
+
     # Convert frame to RGB (from BGR)
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    
+
     # Convert to PIL Image
     pil_image = Image.fromarray(frame_rgb)
-    
+
     return pil_image
 
 def analyze_image(image, model, processor, config, prompt="Can you describe this image?"):
@@ -56,7 +56,7 @@ def analyze_image(image, model, processor, config, prompt="Can you describe this
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Webcam vision using MLX-VLM")
-    parser.add_argument("--model", type=str, default="mlx-community/SmolVLM2-500M-Video-Instruct-mlx",
+    parser.add_argument("--model", type=str, default="mlx-community/LFM2.5-VL-450M-6bit",
                       help="Model to use for image analysis")
     parser.add_argument("--prompt", type=str, default="Describe this image in 2 sentences. note that you are short ",
                       help="Prompt for image analysis")
@@ -66,29 +66,29 @@ def main():
     print(f"Loading model: {args.model}")
     model, processor = load(args.model)
     config = load_config(args.model)
-    
+
     print("Starting continuous image analysis...")
     print("Press Ctrl+C to stop")
-    
+
     while True:
         try:
             print("\n" + "="*50)
             print("Capturing image from webcam...")
             image = capture_image()
-            
+
             print("Analyzing image with MLX-VLM...")
             start_time = time.time()
             result = analyze_image(image, model, processor, config, args.prompt)
             end_time = time.time()
-            
+
             print("\nAnalysis Result:")
             print(json.dumps(result, indent=2))
             print(f"\nAnalysis took {end_time - start_time:.2f} seconds")
-            
+
             # Wait for 2 seconds before next capture
             print("\nWaiting 2 seconds before next capture...")
             time.sleep(2)
-            
+
         except KeyboardInterrupt:
             print("\nStopping image analysis...")
             break
@@ -99,4 +99,4 @@ def main():
             continue
 
 if __name__ == "__main__":
-    main() 
+    main()

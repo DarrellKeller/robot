@@ -28,6 +28,8 @@ MANIFEST
 
 # Virtual environments
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
@@ -64,7 +66,9 @@ LISTENING_COMPLETE.flag
 # Logs
 *.log
 
-# Captured frames and reports created by vision_bakeoff.py
+# Captured frames and benchmark reports
+benchmarks/results/
+# Older benchmark output locations
 bakeoff_results/
 navigation_benchmark_results/
 memory_benchmark_results/

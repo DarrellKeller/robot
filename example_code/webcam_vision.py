@@ -16,8 +16,7 @@ client = OpenAI(base_url="http://localhost:1234/v1", api_key="not-needed")
 
 
 MODEL_NAME = "gpt-4-vision-preview" # Standard OpenAI model
-# For local/custom model, use the model name your server provides, e.g., "moondream" or a specific GGUF name
-# MODEL_NAME = "moondream" # Example for a local model if your server uses this name
+# For a local/custom model, use the model name your server provides.
 
 MAX_TOKENS = 300
 IMAGE_CAPTURE_INTERVAL_SECONDS = 10 # Time between image captures
@@ -28,14 +27,14 @@ def capture_image_from_webcam():
     if not cap.isOpened():
         print("Error: Could not open webcam.")
         return None
-    
+
     ret, frame = cap.read()
     cap.release()
-    
+
     if not ret:
         print("Error: Could not read frame from webcam.")
         return None
-    
+
     return frame
 
 def encode_image_to_base64(frame):
@@ -78,7 +77,7 @@ if __name__ == "__main__":
     print(f"Capturing image every {IMAGE_CAPTURE_INTERVAL_SECONDS} seconds. Press Ctrl+C to stop.")
 
     default_prompt = "Describe this image in detail. What objects do you see? What is happening?"
-    
+
     try:
         while True:
             prompt_input = input(f"Enter your prompt (or press Enter for default: '{default_prompt}'): ")
@@ -86,16 +85,16 @@ if __name__ == "__main__":
 
             print("\nCapturing image...")
             frame = capture_image_from_webcam()
-            
+
             if frame is not None:
                 print("Encoding image...")
                 base64_image_data = encode_image_to_base64(frame)
-                
+
                 print("Analyzing image...")
                 start_time = time.time()
                 description = analyze_image_with_gpt4v(base64_image_data, current_prompt)
                 end_time = time.time()
-                
+
                 if description:
                     print("\n--- Vision Analysis ---")
                     print(f"Prompt: {current_prompt}")
@@ -106,12 +105,12 @@ if __name__ == "__main__":
                     print("Failed to get description from API.")
             else:
                 print("Failed to capture image.")
-            
+
             print(f"Waiting for {IMAGE_CAPTURE_INTERVAL_SECONDS} seconds before next capture...")
             time.sleep(IMAGE_CAPTURE_INTERVAL_SECONDS)
-            
+
     except KeyboardInterrupt:
         print("\nExiting program.")
     finally:
         # Clean up resources if any (e.g., close windows if cv2.imshow was used)
-        cv2.destroyAllWindows() 
+        cv2.destroyAllWindows()
