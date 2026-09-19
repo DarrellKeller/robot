@@ -46,7 +46,7 @@ def _wait_for_turn_completion(ser, timeout=6.0):
     buffer = b""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        data = ser.read(ser.in_waiting or 1)
+        data = ser.read(ser.in_waiting) if ser.in_waiting > 0 else b""
         if data:
             buffer += data
             while b"\n" in buffer:

@@ -1,0 +1,591 @@
+import serial
+import time
+import signal
+import sys
+import csv
+import os
+import json
+
+from dotenv import load_dotenv
+
+# Robot specific module imports
+import tts_module
+import vision_module
+import thinking_module
+import robot_actions
+
+# --- Configuration ---
+SERIAL_PORT = '/dev/tty.usbserial-0001'  # CHANGE THIS to your ESP32's serial port
+BAUD_RATE = 115200
+DATA_TIMEOUT = 1.0  # Seconds to wait for serial data
+EXPECTED_COLUMNS = 17 # Increased from 16 to accommodate PID_Active_ESP
+
+# IPC Flag Files - Using absolute paths to ensure consistency
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+WAKE_WORD_FLAG_FILE = os.path.join(SCRIPT_DIR, "WAKE_WORD_DETECTED.flag")
+LISTENING_COMPLETE_FLAG_FILE = os.path.join(SCRIPT_DIR, "LISTENING_COMPLETE.flag")
+USER_SPEECH_FILE = os.path.join(SCRIPT_DIR, "user_speech.txt")
+# REQUEST_AUDIO_CAPTURE_FLAG = "REQUEST_AUDIO_CAPTURE.flag" # New flag for robot-initiated listening -- REMOVED
+
+# Global serial object
+ser = None
+
+# Robot States
+STATE_IDLE = "IDLE" # Doing nothing, waiting for wakeword or initial start
+STATE_AUTONOMOUS_NAV = "AUTONOMOUS_NAV" # Moving based on ESP32 PID
+STATE_CRITICAL_OBSTACLE_HANDLER = "CRITICAL_OBSTACLE_HANDLER" # ESP32 stopped due to obstacle, Python taking over
+STATE_SURVEY_MODE = "SURVEY_MODE" # Taking pictures (front, left, right)
+STATE_AWAITING_LLM_DECISION = "AWAITING_LLM_DECISION" # Sent info to LLM, waiting for JSON response
+STATE_PROCESSING_USER_COMMAND = "PROCESSING_USER_COMMAND" # Wakeword heard, user speech captured, sending to LLM
+STATE_EXECUTING_LLM_DECISION = "EXECUTING_LLM_DECISION" # Performing actions from LLM JSON
+
+current_robot_state = STATE_IDLE
+previous_robot_data = None # To store the last complete robot data packet
+last_llm_decision = None # To store the last decision from the LLM
+last_action_description_for_llm = None # To store a description of the last action for the LLM context
+current_directive = "Explore the environment, describe what you see, and await further instructions." # Initial directive
+autonomous_nav_start_time = None # To time autonomous navigation sessions
+
+def cleanup_and_exit(sig=None, frame=None):
+    """Gracefully close the serial port and exit."""
+    global ser, current_robot_state
+    print("\nCleaning up and exiting...")
+    current_robot_state = STATE_IDLE # Stop any ongoing processes
+    if ser and ser.is_open:
+        try:
+            robot_actions.stop_robot(ser) # Send a final stop command
+            ser.close()
+            print("Serial port closed.")
+        except Exception as e:
+            print(f"Error during serial cleanup: {e}")
+    # Clear IPC flags (optional, server should also do this on its exit)
+    if os.path.exists(WAKE_WORD_FLAG_FILE):
+        try: os.remove(WAKE_WORD_FLAG_FILE)
+        except OSError as e: print(f"Error removing flag file {WAKE_WORD_FLAG_FILE}: {e}")
+    if os.path.exists(LISTENING_COMPLETE_FLAG_FILE):
+        try: os.remove(LISTENING_COMPLETE_FLAG_FILE)
+        except OSError as e: print(f"Error removing flag file {LISTENING_COMPLETE_FLAG_FILE}: {e}")
+    if os.path.exists(USER_SPEECH_FILE):
+        try: os.remove(USER_SPEECH_FILE)
+        except OSError as e: print(f"Error removing speech file {USER_SPEECH_FILE}: {e}")
+    # REMOVED REQUEST_AUDIO_CAPTURE_FLAG cleanup
+    # if os.path.exists(REQUEST_AUDIO_CAPTURE_FLAG):
+    #     try: os.remove(REQUEST_AUDIO_CAPTURE_FLAG)
+    #     except OSError as e: print(f"Error removing flag file {REQUEST_AUDIO_CAPTURE_FLAG}: {e}")
+    sys.exit(0)
+
+def clear_flag_file(flag_path):
+    """Safely remove a flag file."""
+    if os.path.exists(flag_path):
+        try:
+            os.remove(flag_path)
+            print(f"IPC: Cleared flag file {flag_path}")
+        except OSError as e:
+            print(f"Error removing flag file {flag_path}: {e}")
+
+def connect_serial():
+    """Establish serial connection with the ESP32."""
+    global ser
+    try:
+        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=DATA_TIMEOUT)
+        print(f"Successfully connected to {SERIAL_PORT} at {BAUD_RATE} baud.")
+        time.sleep(2)  # Wait for ESP32 to reset
+        ser.reset_input_buffer()
+        return True
+    except serial.SerialException as e:
+        print(f"Error opening serial port {SERIAL_PORT}: {e}")
+        return False
+
+def parse_data_line(line):
+    """Parse a CSV line of sensor data from ESP32."""
+    try:
+        if isinstance(line, bytes):
+            line = line.decode('utf-8').strip()
+        else:
+            line = line.strip()
+        if not line: return None
+
+        values = list(csv.reader([line]))[0]
+        if len(values) != EXPECTED_COLUMNS:
+            # print(f"Warning: Malformed data. Expected {EXPECTED_COLUMNS}, got {len(values)}. Data: '{line}'")
+            return None
+
+        data = {
+            "L90": int(values[0]), "L45": int(values[1]), "F": int(values[2]), "R45": int(values[3]), "R90": int(values[4]),
+            "sW_L90": float(values[5]), "sW_L45": float(values[6]), "sW_F": float(values[7]), "sW_R45": float(values[8]), "sW_R90": float(values[9]),
+            "SteeringIn": float(values[10]), "PID_Out": float(values[11]),
+            "L_Speed": int(values[12]), "R_Speed": int(values[13]),
+            "BaseSpeed": int(values[14]), "CurSpeed": int(values[15]),
+            "PID_Active_ESP": bool(int(values[16])) # Parsed from ESP32
+        }
+        # Actual PID active status can be inferred if CurSpeed > 0 and no manual command was just sent,
+        # or if ESP32 sends it. For now, this is a simplification.
+        # We can check if CurSpeed is 0 as an indicator of PID stopping or manual stop.
+        return data
+    except ValueError as e:
+        # print(f"Error converting data: {e}. Line: '{line}'")
+        return None
+    except Exception as e:
+        # print(f"An unexpected error during parsing: {e}. Line: '{line}'")
+        return None
+
+
+def initialize_systems(llm_backend="local", gemini_api_key=None):
+    """Initialize TTS and Vision models."""
+    print("Initializing Text-to-Speech system...")
+    if not tts_module.initialize_tts():
+        print("CRITICAL: Failed to initialize TTS. Speech functions will not work.")
+        # Potentially exit or run in a degraded mode
+
+    print("Initializing Vision system...")
+    backend_ok = True
+    if llm_backend == "gemini":
+        backend_ok = thinking_module.configure_llm_backend("gemini", gemini_api_key=gemini_api_key)
+        backend_ok = backend_ok and vision_module.configure_vision_backend("gemini", gemini_api_key=gemini_api_key)
+        if not backend_ok:
+            print("Gemini backend configuration failed. Falling back to local models.")
+            thinking_module.configure_llm_backend("ollama")
+            vision_module.configure_vision_backend("local")
+    else:
+        thinking_module.configure_llm_backend("ollama")
+        vision_module.configure_vision_backend("local")
+
+    if not vision_module.initialize_vision_model():
+        print("CRITICAL: Failed to initialize Vision model. Survey functions will not work.")
+        # Potentially exit or run in a degraded mode
+
+    print("All external systems initialized (or attempted).")
+
+def choose_llm_backend():
+    """Prompt the user to select local or Gemini for thinking and vision."""
+    print("\nSelect LLM backend for this session:")
+    print("  1) Local (Ollama + MLX VLM)")
+    print("  2) Gemini (gemini-3-flash-preview)")
+    choice = input("Enter 1 or 2 [1]: ").strip()
+    backend = "gemini" if choice == "2" else "local"
+    gemini_key = None
+    if backend == "gemini":
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if not gemini_key:
+            gemini_key = input("Enter GEMINI_API_KEY (will not be stored): ").strip()
+        if not gemini_key:
+            print("No GEMINI_API_KEY provided. Falling back to local models.")
+            backend = "local"
+    return backend, gemini_key
+
+# --- Main Application Logic ---
+def main_loop():
+    global ser, current_robot_state, previous_robot_data, last_llm_decision, current_directive, last_action_description_for_llm, autonomous_nav_start_time
+
+    print(f"\nStarting autonomous control loop. Initial state: {current_robot_state}")
+    print("Press Ctrl+C to exit.")
+
+    # Set initial ESP32 mode to autonomous if desired
+    # robot_actions.set_autonomous_mode(ser, True) # Start in autonomous
+    # current_robot_state = STATE_AUTONOMOUS_NAV # If starting autonomously
+
+    last_data_print_time = time.time()
+    last_wake_word_check_time = time.time()
+    awaiting_speech_start_time = None # Timer for robot-requested speech
+    previous_state_for_cleanup = current_robot_state
+
+    while True:
+        try:
+            # --- State transition cleanup logic ---
+            # If we have just transitioned *out* of AUTONOMOUS_NAV, reset its timer.
+            if previous_state_for_cleanup == STATE_AUTONOMOUS_NAV and current_robot_state != STATE_AUTONOMOUS_NAV:
+                print("INFO: Exited autonomous navigation mode. Timer reset.")
+                autonomous_nav_start_time = None
+
+            previous_state_for_cleanup = current_robot_state # Update for the next loop's comparison
+
+            # --- Read Serial Data from ESP32 ---
+            raw_line = None
+            if ser and ser.in_waiting > 0:
+                raw_line = ser.readline()
+                # print(f"Raw from ESP32: {raw_line.strip()}") # Debug raw data
+                robot_data = parse_data_line(raw_line)
+                if robot_data:
+                    previous_robot_data = robot_data # Always store the latest valid data
+                    # Optional: Print data periodically
+                    if time.time() - last_data_print_time > 2.0: # Print data every 2s
+                        print(f"State: {current_robot_state} | ESP32 Data: F={robot_data['F']} L45={robot_data['L45']} R45={robot_data['R45']} | Speed L={robot_data['L_Speed']} R={robot_data['R_Speed']} Cur={robot_data['CurSpeed']}")
+                        last_data_print_time = time.time()
+
+                # Handle non-data messages (like PID Active status from ESP32 if implemented)
+                elif raw_line:
+                    try:
+                        decoded_line = raw_line.decode('utf-8').strip()
+                        if ("BaseSpeed:" in decoded_line
+                            or "PID Active:" in decoded_line
+                            or "initialized." in decoded_line
+                            or "Failed to detect" in decoded_line
+                            or "TIMEOUT" in decoded_line
+                            or "I2C transaction failed" in decoded_line):
+                            if "I2C transaction failed" in decoded_line:
+                                print("ESP32 WARNING: I2C transaction failed. Sensor bus may be disconnected; telemetry may stop.")
+                            else:
+                                print(f"ESP32 MSG: {decoded_line}")
+                    except UnicodeDecodeError:
+                        pass # Already handled by parse_data_line somewhat
+
+            # --- IPC: Check for Wake Word Server Signals ---
+            if time.time() - last_wake_word_check_time > 0.25: # Check every 250ms
+                # Priority 1: A fully transcribed command is ready. This should interrupt almost anything.
+                if os.path.exists(LISTENING_COMPLETE_FLAG_FILE):
+                    print("IPC: LISTENING_COMPLETE_FLAG_FILE detected.")
+                    if current_robot_state != STATE_PROCESSING_USER_COMMAND: # Avoid re-entry if we're already processing.
+                        print(f"IPC: User command received. Interrupting state '{current_robot_state}' to process.")
+                        robot_actions.stop_robot(ser) # Ensure robot is stopped
+                        if ser and ser.is_open: ser.reset_input_buffer() # Clear any stale serial data after stop
+                        last_llm_decision = None # Clear any pending LLM actions from the interrupted state
+                        current_robot_state = STATE_PROCESSING_USER_COMMAND
+                        # No 'continue' here, we want to fall through to the STATE_PROCESSING_USER_COMMAND logic below in this same loop iteration.
+                    else:
+                        # This case is unlikely but good to handle. It means a new command arrived while the old one was still being processed.
+                        print("IPC: Already in STATE_PROCESSING_USER_COMMAND. Ignoring new command to avoid conflict.")
+                        # We must clear the flags to prevent an infinite loop.
+                        clear_flag_file(LISTENING_COMPLETE_FLAG_FILE)
+                        if os.path.exists(USER_SPEECH_FILE):
+                           try: os.remove(USER_SPEECH_FILE)
+                           except OSError: pass
+
+                # Priority 2: The wake word was just heard. This is an immediate "stop and listen" signal.
+                elif os.path.exists(WAKE_WORD_FLAG_FILE):
+                    print("IPC: WAKE_WORD_FLAG_FILE detected. This is an immediate interrupt.")
+                    # Per user request, wake word should interrupt almost any state.
+                    # The only state we don't want to interrupt is one that's already processing a command from a previous wake word.
+                    if current_robot_state != STATE_PROCESSING_USER_COMMAND:
+                        print(f"IPC: Interrupting state '{current_robot_state}'. Stopping robot and returning to IDLE while listening occurs.")
+                        robot_actions.stop_robot(ser) # Immediately stop all movement.
+                        if ser and ser.is_open: ser.reset_input_buffer() # Clear any stale serial data after stop
+
+                        # We can't easily interrupt a blocking `speak()` or `analyze_image()` call,
+                        # but we can prevent subsequent actions and change state.
+
+                        current_robot_state = STATE_IDLE
+                        last_action_description_for_llm = "I was interrupted by the user speaking my wake word." # Provide context for next LLM call
+                        last_llm_decision = None # Clear any pending decisions from the interrupted state
+
+                        clear_flag_file(WAKE_WORD_FLAG_FILE) # Important to clear it after handling.
+
+                        # By setting state to IDLE and continuing, we break the current flow of execution (e.g., a survey sequence).
+                        # The loop will then idle and wait for the LISTENING_COMPLETE_FLAG_FILE.
+                        continue # Restart the main loop to be in a clean IDLE state.
+                    else:
+                        print(f"IPC: In state {current_robot_state}, which is already handling a user command. Ignoring new wake word signal.")
+                        clear_flag_file(WAKE_WORD_FLAG_FILE) # Clear it anyway to prevent re-triggering.
+
+                last_wake_word_check_time = time.time()
+
+            # --- Robot State Machine ---
+            if current_robot_state == STATE_IDLE:
+                # Waiting for a wake word or an event to trigger another state.
+                # Robot will now stay idle unless an IPC event or other logic changes its state.
+                # The proactive survey from IDLE has been removed.
+                pass # Stay idle until an IPC event or other state change occurs
+
+            elif current_robot_state == STATE_AUTONOMOUS_NAV:
+                # Check for autonomous navigation timeout
+                if autonomous_nav_start_time and (time.time() - autonomous_nav_start_time > 15.0):
+                    print("AUTONOMOUS_NAV: 15-second navigation limit reached. Stopping to survey.")
+                    robot_actions.stop_robot(ser)
+                    current_robot_state = STATE_SURVEY_MODE
+                    last_action_description_for_llm = "I moved forward for 15 seconds and am now stopping to survey the area."
+                    continue # Restart loop to immediately handle the new state
+
+                if previous_robot_data:
+                    # Check for critical stop condition triggered by ESP32's TOF logic
+                    # A 1-second grace period is given after entering AUTONOMOUS_NAV to avoid a false positive
+                    # where the robot reports CurSpeed=0 before it has had time to start moving.
+                    if autonomous_nav_start_time and (time.time() - autonomous_nav_start_time > 1.0):
+                        if previous_robot_data["CurSpeed"] == 0 and previous_robot_data.get("PID_Active_ESP", False):
+                            # This logic assumes ESP32 sets CurSpeed to 0 when its internal avoidance stops it.
+                            print("State AUTONOMOUS_NAV: ESP32 reported CurSpeed = 0 after grace period. Obstacle detected by ESP32.")
+                            current_robot_state = STATE_CRITICAL_OBSTACLE_HANDLER
+                # If wake word detected, state will change via IPC check above.
+
+            elif current_robot_state == STATE_CRITICAL_OBSTACLE_HANDLER:
+                print("State CRITICAL_OBSTACLE_HANDLER: Initiating backup and survey.")
+                robot_actions.backup_robot(ser, duration_seconds=2.5)
+                # backup_robot already sends a stop command after backup.
+                current_robot_state = STATE_SURVEY_MODE
+                # Clear any pending LLM decision from a previous cycle if any
+                last_llm_decision = None
+                last_action_description_for_llm = "I was stuck and just backed up."
+
+            elif current_robot_state == STATE_SURVEY_MODE:
+                print("State SURVEY_MODE: Starting visual survey.")
+                descriptions = {"front": "Error during front view", "left": "Error during left view", "right": "Error during right view"}
+
+                # 1. Front View
+                # tts_module.speak("Looking around")
+                img_front = vision_module.capture_image()
+                if img_front:
+                    res_front = vision_module.analyze_image(img_front, prompt="Describe the scene in 3 sentences.")
+                    descriptions["front"] = res_front.get('description', descriptions["front"])
+                    print(f"Survey - Front: {descriptions['front']}")
+                else: print("Survey - Front: Failed to capture image.")
+                time.sleep(0.5)
+
+                # 2. Left View
+                # tts_module.speak("Now, to my left.")
+                robot_actions.turn_robot(ser, 'left', angle_degrees=75.0)
+                img_left = vision_module.capture_image()
+                if img_left:
+                    res_left = vision_module.analyze_image(img_left, prompt="Describe the scene in 3 sentences.")
+                    descriptions["left"] = res_left.get('description', descriptions["left"])
+                    print(f"Survey - Left: {descriptions['left']}")
+                else: print("Survey - Left: Failed to capture image.")
+                time.sleep(0.5)
+
+                # 3. Right View
+                # tts_module.speak("And finally, to my right.")
+                robot_actions.turn_robot(ser, 'right', angle_degrees=120.0) # slight extra for overshoot margin
+                img_right = vision_module.capture_image()
+                if img_right:
+                    res_right = vision_module.analyze_image(img_right, prompt="Describe the scene in 3 sentences.")
+                    descriptions["right"] = res_right.get('description', descriptions["right"])
+                    print(f"Survey - Right: {descriptions['right']}")
+                else: print("Survey - Right: Failed to capture image.")
+                time.sleep(0.5)
+
+                # Return to roughly center (optional, or let LLM decide next turn)
+                # tts_module.speak("Okay, I've had a good look around.")
+                robot_actions.turn_robot(ser, 'left', angle_degrees=60.0) # Attempt to re-center
+                robot_actions.stop_robot(ser)
+
+                print("State SURVEY_MODE: Survey complete. Requesting LLM decision.")
+
+                # Use the last action description if available
+                action_context_for_this_survey = last_action_description_for_llm
+                last_action_description_for_llm = None # Clear after use
+
+                last_llm_decision = thinking_module.get_decision_for_survey(
+                    descriptions["front"],
+                    descriptions["left"],
+                    descriptions["right"],
+                    last_action_context=action_context_for_this_survey, # Pass it here
+                    # current_directive=current_directive # REMOVE: thinking_module manages its own directive
+                )
+                current_robot_state = STATE_EXECUTING_LLM_DECISION
+
+            elif current_robot_state == STATE_PROCESSING_USER_COMMAND:
+                print("State PROCESSING_USER_COMMAND: Reading user speech.")
+                user_speech_text = ""
+                try:
+                    # Wait briefly for file write to complete
+                    for _ in range(5):
+                        if os.path.exists(USER_SPEECH_FILE) and os.path.getsize(USER_SPEECH_FILE) > 0:
+                            break
+                        time.sleep(0.1)
+                    with open(USER_SPEECH_FILE, 'r') as f:
+                        user_speech_text = f.read().strip()
+                    os.remove(USER_SPEECH_FILE) # Clean up file
+                except Exception as e:
+                    print(f"Error reading or deleting user speech file: {e}")
+                    tts_module.speak("I had trouble understanding what you said.")
+                    clear_flag_file(LISTENING_COMPLETE_FLAG_FILE) # Ensure flag is cleared before changing state
+                    current_robot_state = STATE_IDLE
+                    continue
+
+                if user_speech_text:
+                    # The formatted_command in autonomous_control.py was already quite good at providing context.
+                    # thinking_module.get_decision_for_user_command also appends its own directive context.
+                    # We'll let thinking_module handle adding its internal directive to the prompt for consistency.
+                    formatted_command = f"A commanding voice addressing you has said \"{user_speech_text}\". How do you respond?"
+                    print(f"Sending to LLM for user command: {formatted_command}")
+
+                    print("Waiting for response from thinking_module...")
+                    last_llm_decision = thinking_module.get_decision_for_user_command(
+                        formatted_command
+                        # current_directive=current_directive # REMOVE: thinking_module manages its own directive
+                    )
+                    print(f"Received response from thinking_module: {last_llm_decision}")
+
+                    current_robot_state = STATE_EXECUTING_LLM_DECISION
+                else:
+                    print("User speech was empty.")
+                    tts_module.speak("I didn't catch that, please try again after the wake word.")
+                    current_robot_state = STATE_IDLE
+
+                clear_flag_file(LISTENING_COMPLETE_FLAG_FILE) # Always clear the flag after attempting to process
+                continue
+
+            elif current_robot_state == STATE_EXECUTING_LLM_DECISION:
+                decision_str = "Invalid/Empty Decision"
+                try:
+                    decision_str = json.dumps(last_llm_decision, indent=2)
+                except Exception as json_e:
+                    decision_str = f"Could not serialize decision to JSON: {json_e}. Decision was: {last_llm_decision}"
+                print(f"State EXECUTING_LLM_DECISION: Processing decision: {decision_str}")
+
+                if not last_llm_decision or last_llm_decision.get('error'): # More robust check for error
+                    speak_message = "I had a problem with my thinking process. I'll just stop for now."
+                    if last_llm_decision and last_llm_decision.get("speak"): # Check if last_llm_decision is not None before .get()
+                         speak_message = last_llm_decision["speak"]
+                    tts_module.speak(speak_message)
+                    robot_actions.stop_robot(ser)
+                    current_robot_state = STATE_IDLE
+                    last_llm_decision = None
+                    continue
+
+                action_sets_specific_next_state = False
+                any_action_other_than_speak_or_directive_change = False
+                next_state_after_actions = STATE_IDLE # Default next state if no movement or survey command
+
+                survey_or_autonav_chosen_this_cycle = False # Flag for mutual exclusivity
+
+                # Define a priority for actions to resolve conflicts (e.g., stop vs. other movements)
+                # and ensure important context changes happen first (e.g., change_directive).
+                action_priority = [
+                    "change_directive",
+                    "speak",
+                    "turn_left",
+                    "turn_right",
+                    "move_forward_autonomously",
+                    "dance",
+                    "stop",
+                    "survey",
+                ]
+                actions_to_execute = [action for action in action_priority if action in last_llm_decision]
+
+                for action_key in actions_to_execute:
+                    action_value = last_llm_decision.get(action_key)
+
+                    if action_key == "speak" and action_value:
+                        tts_module.speak(action_value)
+                        time.sleep(0.2)
+
+                    elif action_key == "change_directive" and action_value:
+                        new_directive = action_value
+                        print(f"LLM Command: Change Directive to '{new_directive}'")
+                        # autonomous_control.py keeps its own copy of current_directive updated if needed for its own logic/logging.
+                        # The primary update happens within thinking_module.py's process_llm_response.
+                        current_directive = new_directive
+                        last_action_description_for_llm = f"My directive was just updated to: {current_directive}."
+
+                    elif action_key == "stop" and action_value is True:
+                        print("LLM Command: Stop")
+                        robot_actions.stop_robot(ser)
+                        current_robot_state = STATE_IDLE
+                        action_sets_specific_next_state = True
+                        any_action_other_than_speak_or_directive_change = True
+                        last_action_description_for_llm = "I was told to stop."
+                        break
+
+                    elif action_key == "survey" and action_value is True:
+                        if not survey_or_autonav_chosen_this_cycle:
+                            print("LLM Command: Survey")
+                            current_robot_state = STATE_SURVEY_MODE
+                            action_sets_specific_next_state = True
+                            any_action_other_than_speak_or_directive_change = True
+                            last_action_description_for_llm = "I am initiating a survey."
+                            survey_or_autonav_chosen_this_cycle = True
+                            break
+                        else:
+                            print("LLM Command: Survey requested, but move_forward_autonomously already chosen this cycle. Ignoring survey.")
+
+                    elif action_key == "move_forward_autonomously" and action_value is True:
+                        if not survey_or_autonav_chosen_this_cycle:
+                            print("LLM Command: Move Forward Autonomously")
+                            robot_actions.set_autonomous_mode(ser, True)
+                            current_robot_state = STATE_AUTONOMOUS_NAV
+                            autonomous_nav_start_time = time.time() # Start the 10-second timer
+                            action_sets_specific_next_state = True
+                            any_action_other_than_speak_or_directive_change = True
+                            last_action_description_for_llm = "I am now moving forward autonomously."
+                            survey_or_autonav_chosen_this_cycle = True
+                            break
+                        else:
+                            print("LLM Command: move_forward_autonomously requested, but survey already chosen this cycle. Ignoring.")
+
+                    elif action_key == "turn_left" and action_value is True:
+                        print("LLM Command: Turn Left")
+                        robot_actions.turn_robot(ser, 'left', 0.5)
+                        any_action_other_than_speak_or_directive_change = True
+                        last_action_description_for_llm = "I just turned left."
+                        next_state_after_actions = STATE_SURVEY_MODE
+                    elif action_key == "turn_right" and action_value is True:
+                        print("LLM Command: Turn Right")
+                        robot_actions.turn_robot(ser, 'right', 0.5)
+                        any_action_other_than_speak_or_directive_change = True
+                        last_action_description_for_llm = "I just turned right."
+                        next_state_after_actions = STATE_SURVEY_MODE
+
+                    elif action_key == "dance" and action_value is True:
+                        print("LLM Command: Dance!")
+                        robot_actions.dance_silly(ser)
+                        any_action_other_than_speak_or_directive_change = True
+                        last_action_description_for_llm = "I just performed a dance."
+                        next_state_after_actions = STATE_SURVEY_MODE
+
+                current_llm_speak_output_was_present = "speak" in last_llm_decision
+                last_llm_decision = None
+
+                if not action_sets_specific_next_state:
+                    if any_action_other_than_speak_or_directive_change:
+                        print(f"Discrete actions completed. Transitioning to {next_state_after_actions}.")
+                        # After manual actions (turn, dance), the ESP32's PID is off and it stops sending data.
+                        # We must re-enable it to resume the data stream, which prevents the main loop from hanging
+                        # on the serial read. The robot won't move because its speed is zero.
+                        print("Re-enabling ESP32 data stream before proceeding...")
+                        robot_actions.set_autonomous_mode(ser, True)
+                        time.sleep(0.1) # Brief pause for ESP32 to react
+                        if ser and ser.is_open: ser.reset_input_buffer() # Clear any old command echoes
+
+                        current_robot_state = next_state_after_actions
+                    else:
+                        print("No movement or major state-changing action from LLM. Going to IDLE.")
+                        current_robot_state = STATE_IDLE
+                        if not last_action_description_for_llm:
+                           last_action_description_for_llm = "I just spoke or had my directive updated based on LLM guidance." if current_llm_speak_output_was_present or ("change_directive" in actions_to_execute) else "The LLM gave no specific action, so I am now idle."
+
+                continue
+
+            # Small delay to prevent high CPU usage if no blocking calls are made
+            time.sleep(0.05)
+
+        except serial.SerialException as e:
+            print(f"Serial error: {e}. Attempting to reconnect...")
+            if ser and ser.is_open: ser.close()
+            time.sleep(3)
+            if not connect_serial():
+                print("Reconnect failed. Exiting.")
+                cleanup_and_exit()
+            else:
+                if ser: ser.reset_input_buffer()
+        except KeyboardInterrupt:
+            print("Main loop interrupted by user.")
+            break
+        except Exception as e:
+            print(f"An error occurred in main_loop: {e}")
+            # Consider which state to revert to on general error, maybe IDLE
+            # current_robot_state = STATE_IDLE
+            # tts_module.speak("Oh dear, something went wrong with my main functions.")
+            time.sleep(1) # Avoid rapid error logging
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGINT, cleanup_and_exit)
+    signal.signal(signal.SIGTERM, cleanup_and_exit)
+
+    load_dotenv()
+
+    # Clear any lingering IPC files from a previous run
+    for f in [WAKE_WORD_FLAG_FILE, LISTENING_COMPLETE_FLAG_FILE, USER_SPEECH_FILE]: #, REQUEST_AUDIO_CAPTURE_FLAG]:
+        if os.path.exists(f):
+            try: os.remove(f)
+            except OSError as e: print(f"Could not remove old IPC file {f}: {e}")
+
+    llm_backend, gemini_key = choose_llm_backend()
+    initialize_systems(llm_backend=llm_backend, gemini_api_key=gemini_key) # Initialize TTS, Vision
+
+    if connect_serial():
+        # Start in IDLE state, it will transition to AUTONOMOUS_NAV if conditions are met
+        current_robot_state = STATE_IDLE
+        # Or uncomment below to start directly in autonomous mode:
+        # robot_actions.set_autonomous_mode(ser, True)
+        # current_robot_state = STATE_AUTONOMOUS_NAV
+        main_loop()
+
+    cleanup_and_exit()

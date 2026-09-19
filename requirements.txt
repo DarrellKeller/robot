@@ -4,9 +4,13 @@ ollama>=0.1.0
 pyserial>=3.5
 piper-tts>=1.0.0
 numpy>=1.21.0
-mlx
-mlx-vlm
+mlx>=0.32.2
+mlx-vlm>=0.7.1
 mlx-whisper
 pyaudio
 requests
-tqdm 
+tqdm
+google-generativeai
+python-dotenv
+# Local vision bake-off image processor.
+torchvision>=0.29.0

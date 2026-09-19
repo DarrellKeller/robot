@@ -1,8 +1,17 @@
 import ollama
 import json
+import os
 from pydantic import BaseModel
 
-MODEL_NAME = 'gemma3' # Or your preferred Ollama model for this task
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+
+OLLAMA_MODEL_NAME = 'gemma3' # Or your preferred Ollama model for this task
+GEMINI_MODEL_NAME = 'gemini-3-flash-preview'
+LLM_BACKEND = "ollama" # "ollama" or "gemini"
+_gemini_api_key = None
 MAX_CONVERSATION_HISTORY = 20 # Max user/assistant turn pairs
 
 # Define the Pydantic model for structured output
@@ -21,7 +30,7 @@ current_directive = "move to find a new objective"
 
 def get_system_prompt():
     # Dynamically create the system prompt with the current directive
-    return f"""You are an sassy, slay, boy named Mauricio. Current directive: {{current_directive}}.
+    return f"""You are an sassy, slay, boy named Mauricio. Current directive: {current_directive}.
     If you complete the directive, set next directive to: Look for a new objective.
     You MUST respond using the provided JSON schema. ALL actions, including movements, surveys, dances, stops, and directive changes, MUST be specified using their dedicated JSON keys.
     Order keys by intended execution sequence. Only use defined keys.
@@ -46,6 +55,37 @@ def get_system_prompt():
     """
 
 conversation_history = []
+
+def configure_llm_backend(backend, gemini_api_key=None, gemini_model_name=None, ollama_model_name=None):
+    """Configure which LLM backend to use (ollama or gemini)."""
+    global LLM_BACKEND, GEMINI_MODEL_NAME, OLLAMA_MODEL_NAME, _gemini_api_key
+    if ollama_model_name:
+        OLLAMA_MODEL_NAME = ollama_model_name
+    if gemini_model_name:
+        GEMINI_MODEL_NAME = gemini_model_name
+
+    backend = (backend or "").strip().lower()
+    if backend not in ("ollama", "gemini"):
+        print(f"Unknown LLM backend '{backend}'. Defaulting to ollama.")
+        LLM_BACKEND = "ollama"
+        return True
+
+    if backend == "gemini":
+        if genai is None:
+            print("Gemini backend requested but google-generativeai is not installed.")
+            return False
+        _gemini_api_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
+        if not _gemini_api_key:
+            print("Gemini backend requested but GEMINI_API_KEY is not set.")
+            return False
+        genai.configure(api_key=_gemini_api_key)
+        LLM_BACKEND = "gemini"
+        print(f"LLM backend set to Gemini ({GEMINI_MODEL_NAME}).")
+        return True
+
+    LLM_BACKEND = "ollama"
+    print(f"LLM backend set to Ollama ({OLLAMA_MODEL_NAME}).")
+    return True
 
 def add_to_history(role, content):
     """Adds a message to the conversation history and maintains its size."""
@@ -88,9 +128,31 @@ def get_decision_for_survey(front_desc, left_desc, right_desc, last_action_conte
         {'role': 'system', 'content': get_system_prompt()}
     ] + conversation_history
 
+    if LLM_BACKEND == "gemini":
+        if genai is None:
+            return {"error": "Gemini backend unavailable (missing google-generativeai)."}
+        try:
+            model = genai.GenerativeModel(
+                GEMINI_MODEL_NAME,
+                system_instruction=get_system_prompt()
+            )
+            response = model.generate_content(
+                [
+                    {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
+                    for m in conversation_history
+                ],
+                generation_config={"temperature": 0}
+            )
+            response_text = (response.text or "").strip()
+            add_to_history('assistant', response_text)
+            return process_llm_response(response_text)
+        except Exception as e:
+            print(f"Error communicating with Gemini: {e}")
+            return {"error": str(e)}
+
     try:
         response = ollama.chat(
-            model=MODEL_NAME,
+            model=OLLAMA_MODEL_NAME,
             messages=messages_for_llm,
             format=RobotActionResponse.model_json_schema(), # Use Pydantic schema
             options={'temperature': 0, 'num_ctx': 2000} # For more deterministic output
@@ -98,7 +160,6 @@ def get_decision_for_survey(front_desc, left_desc, right_desc, last_action_conte
         response_text = response['message']['content']
         add_to_history('assistant', response_text) # Add LLM's raw response to history
         return process_llm_response(response_text)
-            
     except Exception as e:
         print(f"Error communicating with Ollama: {e}")
         return {"error": str(e)}
@@ -116,9 +177,31 @@ def get_decision_for_user_command(user_command):
         {'role': 'system', 'content': get_system_prompt()}
     ] + conversation_history
 
+    if LLM_BACKEND == "gemini":
+        if genai is None:
+            return {"error": "Gemini backend unavailable (missing google-generativeai)."}
+        try:
+            model = genai.GenerativeModel(
+                GEMINI_MODEL_NAME,
+                system_instruction=get_system_prompt()
+            )
+            response = model.generate_content(
+                [
+                    {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
+                    for m in conversation_history
+                ],
+                generation_config={"temperature": 0}
+            )
+            response_text = (response.text or "").strip()
+            add_to_history('assistant', response_text)
+            return process_llm_response(response_text)
+        except Exception as e:
+            print(f"Error communicating with Gemini: {e}")
+            return {"error": str(e)}
+
     try:
         response = ollama.chat(
-            model=MODEL_NAME,
+            model=OLLAMA_MODEL_NAME,
             messages=messages_for_llm,
             format=RobotActionResponse.model_json_schema(), # Use Pydantic schema
             options={'temperature': 0, 'num_ctx': 2000} # For more deterministic output
@@ -126,7 +209,6 @@ def get_decision_for_user_command(user_command):
         response_text = response['message']['content']
         add_to_history('assistant', response_text)
         return process_llm_response(response_text)
-
     except Exception as e:
         print(f"Error communicating with Ollama: {e}")
         return {"error": str(e)}

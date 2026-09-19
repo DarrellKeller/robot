@@ -64,9 +64,19 @@ LISTENING_COMPLETE.flag
 # Logs
 *.log
 
+# Captured frames and reports created by vision_bakeoff.py
+bakeoff_results/
+navigation_benchmark_results/
+memory_benchmark_results/
+
 # Backups
 backups/
 
 # OS generated files
 .directory
-.fuse_hidden* 
+.fuse_hidden*
+
+# Private robot mission/dialogue and audio artifacts
+runtime/
+user_speech.txt
+output.wav

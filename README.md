@@ -1,114 +1,220 @@
-# Robot Control Project
+# Mauricio: Jev-controlled indoor robot
 
-This project controls a robot with autonomous navigation capabilities, voice interaction, and AI-driven decision-making.
+Jev makes short, typed decisions from ToF, MPU heading, local vision, dialogue,
+subgoals and recent outcomes. Python owns execution and persistence. The ESP32
+owns motor output, continuous sensor acquisition, clearance checks and a command
+watchdog. LFM2.5-VL-450M supplies descriptions, speech text and proposed subgoals.
 
-## Overview
+## Architecture
 
-The robot uses an ESP32 microcontroller for low-level motor control and sensor readings (Time-of-Flight distance sensors). A Python application running on a host computer (a mac mini) handles higher-level logic, including:
+- `autonomous_control.py`: entry point; runs the Jev controller by default.
+- `jev_control.py`: independent decision, vision, audio and telemetry scheduling.
+- `jev_client.py`: TypeSafe HTTP client and the seven existing typed questions.
+- `robot_link.py`: single serial reader and protocol-v2 movement dispatch.
+- `mission_store.py`: atomic persistence of subgoals, dialogue, observed motion,
+  recovery outcomes and selected visual memories.
+- `lfm_tools.py`: resident MLX model, bounded priority queue and persistent camera.
+- `audio_controller.py`: sole microphone/playback owner, Whisper wake detection,
+  question/answer capture and Piper playback.
+- `motor_control/motor_control.ino`: protocol-v2 ESP32 firmware.
+- `legacy_autonomous_control.py`: previous controller, preserved separately.
 
-*   Serial communication with the ESP32.
-*   Wake word detection and speech-to-text using local models (Piper TTS, MLX Whisper).
-*   Image capture and analysis using local vision models (e.g., MLX-VLM, Moondream via Ollama).
-*   Decision-making using a local large language model (LLM via Ollama, e.g., Gemma3).
-*   Executing actions based on LLM decisions (e.g., navigation, speaking, surveying).
+There is no exclusive `next_mode`. Movement, vision and speech can proceed
+independently. Speaking and microphone capture are mutually exclusive. A pending
+question holds motion until answered or listening times out.
 
-## Core Components
+| Jev question | Type | Purpose |
+| --- | --- | --- |
+| `movement` | Choice | `forward`, `left`, `right`, `stop` |
+| `need_fresh_vision` | Noul | Gate an additional visual inspection |
+| `lfm_vision_tool` | Choice | Scene, goal search, person inspection, text reading |
+| `should_ask_person` | Noul | Request clarification or fulfill an asking step |
+| `lfm_speech_tool` | Choice | None, question, answer, update, celebration |
+| `goal_complete` | Noul | Completion evidence for the current subgoal |
+| `should_remember` | Noul | Retain the current observation as a sourced fact |
 
-*   `autonomous_control.py`: The main Python script that orchestrates all robot functions and manages its state.
-*   `robot_actions.py`: Module for sending specific commands (move, turn, stop, etc.) to the ESP32.
-*   `tts_module.py`: Handles Text-to-Speech using Piper.
-*   `vision_module.py`: Handles image capture and analysis using MLX-VLM or a similar local vision model.
-*   `thinking_module.py`: Interacts with a local LLM (via Ollama) to get decisions based on sensory input or user commands.
-*   `wakeword_server.py`: A separate process that continuously listens for a wake word, transcribes user speech, and communicates with `autonomous_control.py` via flag files.
-*   `motor_control/motor_control.ino`: Arduino sketch for the ESP32, managing motors, sensors, and PID control for basic obstacle avoidance.
-*   `example_code/`: Contains various standalone scripts for testing individual components (TTS, vision, ESP32 direct control, etc.).
+Recovery adds no questions: recent attempts, interruption reasons, repeated
+failures and a step-overdue event become input to these same questions. Firmware
+sensor/clearance stops never depend on a model's answer.
 
 ## Setup
 
-1.  **Hardware:**
-    *   ESP32 microcontroller.
-    *   Robot chassis with motors and motor driver.
-    *   Time-of-Flight (ToF) distance sensors (e.g., VL53L0X) connected via an I2C multiplexer (e.g., TCA9548A).
-    *   Webcam connected to the host computer.
-    *   Microphone connected to the host computer.
-    *   Speakers connected to the host computer.
+Install Python requirements in the project's environment:
 
-2.  **ESP32 Firmware:**
-    *   Flash `motor_control/motor_control.ino` to your ESP32 using the Arduino IDE.
-    *   Ensure all necessary libraries (e.g., `Wire`, `VL53L0X`, `PID_v1`) are installed in your Arduino environment.
-
-3.  **Python Environment (Host Computer):**
-    *   Create a Python virtual environment (recommended).
-    *   Install required Python packages:
-        ```bash
-        pip install -r requirements.txt
-        ```
-    *   Ensure Ollama is installed and running, and that you have pulled the necessary models (e.g., `ollama pull gemma3`, `ollama pull moondream`). Refer to Ollama's documentation for setup.
-    *   Ensure MLX and its related vision/audio models are set up if you intend to use them directly. Refer to MLX documentation.
-    *   Download TTS voice models (e.g., `en_US-ryan-low.onnx` and its `.json` config file) and place them in the `robot/` directory or `robot/example_code/` for the example script. The `example_code/download_voice.py` script can assist with this.
-
-4.  **Configuration:**
-    *   In `autonomous_control.py`:
-        *   Update `SERIAL_PORT` to match your ESP32's serial port.
-    *   In `tts_module.py`, `vision_module.py`, `thinking_module.py`, and `wakeword_server.py`:
-        *   Verify model names and paths if you are using different local models or configurations.
-        *   The vision module (`vision_module.py`) and thinking module (`thinking_module.py`) are configured to use MLX-VLM and Ollama respectively. Adjust if using different backends.
-    *   The `wakeword_server.py` and `autonomous_control.py` use flag files for inter-process communication. Ensure write permissions for these files in the project directory.
-
-## Running the Robot
-
-1.  **Start Ollama Service:** Ensure your Ollama service is running with the required models downloaded.
-2.  **Start Wake Word Server:**
-    ```bash
-    python robot/wakeword_server.py
-    ```
-3.  **Start Main Control Script:** In a new terminal:
-    ```bash
-    python robot/autonomous_control.py
-    ```
-
-The robot should initialize, and if configured to start autonomously, it will begin navigating. You can interact with it using the defined wake word.
-
-## ESP32 Serial Commands (for direct control via `example_code/esp32_control.py` or other serial tools)
-
-*   `w`: Move forward
-*   `s`: Move backward
-*   `a`: Turn left
-*   `d`: Turn right
-*   `x`: Stop motors
-*   `p`: Toggle PID autonomous mode on/off
-*   `0`-`9`: Set base speed (0 for max speed ~100%, 9 for min speed ~10%)
-
-## Project Structure
-
-```
-robot/
-├── autonomous_control.py       # Main control logic
-├── robot_actions.py            # Functions to send commands to ESP32
-├── tts_module.py               # Text-to-Speech handling
-├── vision_module.py            # Image capture and analysis
-├── thinking_module.py          # LLM interaction for decisions
-├── wakeword_server.py          # Wake word detection and speech capture server
-├── requirements.txt            # Python dependencies
-├── README.md                   # This file
-├── example_code/               # Directory for standalone example scripts
-│   ├── esp32_control.py
-│   ├── mlx_webcam_vision.py
-│   ├── piper_with_playback.py
-│   ├── scene_analyzer.py
-│   ├── test_original_format.py
-│   ├── download_voice.py
-│   ├── wakeword_detector.py
-│   ├── webcam_vision_moondream_local.py
-│   └── webcam_vision.py
-├── motor_control/
-│   └── motor_control.ino       # ESP32 firmware
-├── en_US-ryan-low.onnx         # Example TTS voice model
-└── en_US-ryan-low.onnx.json    # Example TTS voice model config
+```sh
+python -m pip install -r requirements.txt
 ```
 
-## Notes
+Create `.env` (ignored by Git):
 
-*   The system relies heavily on local AI models. Performance will vary based on the host computer's hardware.
-*   Paths to models and serial ports may need adjustment based on your specific setup.
-*   The inter-process communication via flag files is a simple mechanism; for more complex applications, a more robust IPC method (like sockets or message queues) might be considered. 
+```dotenv
+JEV_API_KEY=your_key
+JEV_MODEL=jev-1.13.0
+```
+
+The version is pinned because model changes can affect calibrated thresholds.
+The client sends state and typed questions to `https://api.typesafe.ai/v1/systemone`.
+It does not retry an old physical snapshot; the loop backs off and submits fresh
+state after errors. Never put keys into tracked files or CLI arguments.
+
+Local models:
+
+- Vision, speech text and plan proposals: `mlx-community/LFM2.5-VL-450M-6bit`.
+- Whisper: `mlx-community/whisper-base.en-mlx`.
+- Piper: place `en_US-ryan-high.onnx` and its JSON config beside `tts_module.py`.
+
+Grant camera and microphone access to the terminal/app used to run Python.
+**Do not run `wakeword_server.py` alongside the Jev controller.** Audio is now
+owned by the controller itself. The old server remains for the legacy path.
+
+## Firmware compatibility
+
+Compile/upload `motor_control/motor_control.ino` for your ESP32 with the Pololu
+VL53L0X library. This firmware and the new controller must be deployed together.
+The host refuses movement without protocol-v2 telemetry. Old one-character
+movement commands cannot start motors on the new firmware; `x` still stops them.
+
+The existing wiring is retained: five ToF sensors at left 90°, left 45°, front,
+right 45°, right 90°, via TCA channels 7, 6, 5, 4, 3. Motor pins are unchanged.
+The gyro driver retains the existing MPU-6050-compatible register map and Y-axis
+rotation convention. It reports the detected model. **MPU-3050 compatibility has
+not been established**; verify the actual module and mounting before driving.
+No fabricated support or absolute compass heading is assumed.
+
+## Running
+
+Default is a dry run: **no serial port is opened and no motor commands are sent**.
+The camera, local models, audio and Jev API still operate unless disabled. Without
+sensor telemetry the only permitted movement is stop; dry run is not a simulator.
+
+```sh
+python autonomous_control.py --goal "Find the dining table, dance beside it, then ask whether people liked it."
+```
+
+A live run requires an explicit flag and the matching firmware:
+
+```sh
+python autonomous_control.py --live --port /dev/tty.usbserial-0001 --goal "Find the dining table"
+```
+
+Other options:
+
+```sh
+python autonomous_control.py --help
+python autonomous_control.py --no-audio --no-camera --duration 10
+python autonomous_control.py --live --resume
+python autonomous_control.py --vision-hz 2
+```
+
+Use a wake word such as “robot” or “Mauricio.” A command can follow the wake word
+in the same utterance, or the robot listens for a follow-up. After the robot asks
+a question, it listens automatically without requiring another wake word.
+“Stop,” “cancel,” “stop moving,” and “cancel task” stop and pause the task.
+“Resume” or “continue” explicitly resumes a retained plan. Voice capture does not
+interrupt TTS; Ctrl-C and the serial `x` stop are independent of audio.
+
+Active missions load paused on restart. Use `--resume` explicitly. Runtime state
+and bounded decision logs live under ignored `runtime/`; `--state PATH` selects
+another store. Decision logs include the sent state, answers and dispatched action.
+They can contain private dialogue and observations; keep them local.
+
+## Goals and execution
+
+LFM proposes at most eight sequential subgoals with `kind`, `instruction` and
+`completion`. Kinds are `navigate`, `dance`, `talk`, `listen`. Code validates the
+schema; LFM never dispatches motors. Jev judges navigation completion; actual
+playback and captured answers govern talk/listen completion. Dance completion
+requires at least four seconds of reported pivot motion as well as Jev's
+completion judgment. Jev selects the individual pivots; no blocking dance macro
+runs behind it.
+
+Plan quality still needs task trials. To bypass generative planning, supply a
+reviewed JSON file with `--plan PATH`:
+
+```json
+{
+  "intent": "new_goal",
+  "steps": [
+    {
+      "kind": "navigate",
+      "instruction": "Find the dining table",
+      "completion": "The dining table is visible in a fresh observation"
+    },
+    {
+      "kind": "talk",
+      "instruction": "Tell the user that the table was found",
+      "completion": "The announcement finished playing"
+    }
+  ]
+}
+```
+
+Repeated identical movement segments are merged. Route entries distinguish
+reported motor activity from measured heading change: **translation is
+unmeasured**. Gyro heading is continuous relative to startup and can drift. These
+are useful breadcrumbs, not position localization or a reliable return route.
+Stored scene descriptions retain their source; they are model observations,
+not independently verified map facts.
+
+## Timing and command protocol
+
+Initial settings are deliberately explicit and need chassis testing:
+
+- Jev: up to 4 requests/second; one request in flight. Discard responses older
+  than 450 ms or belonging to an earlier goal/subgoal.
+- Vision: 1 observation/second by default, configurable up to 2. Explicit
+  inspections take priority over the next background job. One pending job per
+  kind prevents frame and speech backlogs; one model worker owns LFM inference.
+  LFM and Whisper serialize device inference; Jev and motor control remain independent.
+- Vision becomes stale after 2 seconds or 25° of heading change. Motion then
+  stops until a fresh view is available. Camera capture itself runs continuously.
+- Host: rechecks fresh sensors at dispatch; stops when telemetry is older than
+  250 ms. Stops after 500 ms without a usable decision.
+- Firmware: each motion lease is 600 ms; maximum accepted lease is 650 ms.
+  Renewing an action continues it smoothly. Expiry stops motors; it does not
+  grant permission to keep moving for an entire subgoal.
+- Firmware samples ready ToF measurements without waiting for a new range and
+  reports telemetry every 50 ms in every mode. Invalid/stale ranges are `null`,
+  never “clear.” MPU is polled throughout movement, including turns.
+- Motion requires five healthy ToF readings and a fresh calibrated MPU. Forward
+  checks the three forward-facing ranges; pivots check all five, at 300 mm.
+  Reverse is not exposed because rear coverage is absent. PWM defaults to 100.
+- Confidence settings (0.75 choices, 0.8 Nouls, 0.9 completion) are initial
+  policy settings, not empirically established reliability guarantees.
+
+Host command (newline terminated):
+
+```text
+M,42,left,600
+M,43,stop,600
+```
+
+Firmware telemetry (one JSON object per line):
+
+```json
+{"protocol":2,"uptime_ms":1000,"command_id":42,"motion":"left","stop_reason":"none","tof_mm":[900,900,900,900,900],"heading_deg":72.0,"yaw_rate_dps":20.0,"imu_valid":true,"imu_age_ms":5,"imu_model":"MPU-6050"}
+```
+
+## Validation and legacy code
+
+Offline control-boundary tests:
+
+```sh
+python -m unittest discover -s tests -v
+arduino-cli compile --fqbn esp32:esp32:esp32 motor_control
+```
+
+These check software behavior/buildability, not physical braking, sensor coverage,
+turn direction, model judgment, conversational quality or sustained throughput.
+Live robot tests, PWM/clearance calibration and end-to-end task trials remain.
+
+For the old controller, `python autonomous_control.py --legacy` runs the retained
+code. It requires the **old firmware** and the old separate wakeword server; it is
+not a compatibility mode for protocol v2. Older benchmark scripts and example
+programs remain separate from the Jev runtime.
+
+References: [TypeSafe architecture](https://docs.typesafe.ai/concepts/how-to-build-with-system-one),
+[parallel questions](https://docs.typesafe.ai/patterns/fan-out),
+[API](https://docs.typesafe.ai/api),
+[Jev limitations](https://docs.typesafe.ai/model-jaggedness/jev-1.13),
+[Pololu VL53L0X library](https://github.com/pololu/vl53l0x-arduino).
