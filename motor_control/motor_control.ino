@@ -1,5 +1,5 @@
 // Motor control pins
-const int rightForward = 2;  // GPIO2   
+const int rightForward = 2;  // GPIO2
 const int rightBackward = 4;  // GPIO4
 const int leftForward = 18;  // GPIO18 (corrected from GPIO5 in original comment)
 const int leftBackward = 5;  // GPIO5 (corrected from GPI18 in original comment)
@@ -9,7 +9,8 @@ const int leftPWM = 19;      // GPIO19
 // I2C and Sensor related includes and defines
 #include <Wire.h>
 #include <VL53L0X.h> // Using standard VL53L0X library
-#include <PID_v1.h>
+#include <stdlib.h>
+#include <string.h>
 #include <math.h>
 
 // MPU-6050 (IMU) definitions
@@ -48,356 +49,175 @@ void IRAM_ATTR onImuDataReady() {
   imuDataReady = true;
 }
 
+// Protocol v2: M,<sequence>,<stop|forward|left|right>,<lease_ms>\n
+// No legacy command can start a motor. Flash together with the Jev host.
+const uint8_t TCAADDR = 0x70;
+const uint8_t channels[5] = {7, 6, 5, 4, 3};
+VL53L0X sensors[5];
+bool sensorReady[5] = {};
+int rangeMM[5] = {};
+unsigned long rangeAt[5] = {};
+bool rangeValid[5] = {};
+const unsigned long SENSOR_MAX_AGE_MS = 250;
+const unsigned long MAX_LEASE_MS = 650;
+const int CLEARANCE_MM = 300;
+const int DRIVE_PWM = 100; // Calibrate on the chassis before free roaming.
+const int TURN_PWM = 100;
+unsigned long leaseUntil = 0;
+unsigned long lastTelemetry = 0;
+uint32_t commandId = 0;
+const char* motion = "stop";
+const char* stopReason = "startup";
+char commandBuffer[80];
+size_t commandLength = 0;
+bool discardCommand = false;
+
 bool initializeIMU();
 void calibrateGyro(int samples = 1000);
 bool readGyroRaw(int16_t &gx, int16_t &gy, int16_t &gz);
 void updateGyro(bool force = false);
-float getHeadingDegrees();
-float normalizeAngle(float angle);
-float headingError(float target);
-bool turnDegrees(float degrees, int fastSpeed = 160, int slowSpeed = 110, float tolerance = 3.0f);
-void applyPivot(int direction, int speed);
-void zeroHeading();
-void pivotWithoutIMU(int direction, unsigned long durationMs, int speed);
-void sendTurnStatus(const char* direction, const char* status);
 
-#define TCAADDR 0x70 // TCA9548A I2C multiplexer address
+void stopMotors() {
+  analogWrite(rightPWM, 0); analogWrite(leftPWM, 0);
+  digitalWrite(rightForward, LOW); digitalWrite(rightBackward, LOW);
+  digitalWrite(leftForward, LOW); digitalWrite(leftBackward, LOW);
+}
 
-// Sensor objects
-VL53L0X sensorL90; // Left 90 degrees on TCA Channel 7
-VL53L0X sensorL45; // Left 45 degrees on TCA Channel 6
-VL53L0X sensorF;   // Front on TCA Channel 5
-VL53L0X sensorR45; // Right 45 degrees on TCA Channel 4
-VL53L0X sensorR90; // Right 90 degrees on TCA Channel 3
+void halt(const char* reason) {
+  stopMotors(); motion = "stop"; stopReason = reason;
+}
 
-// Moving average window size - Removed as VL53L0X_MA.h is not used
-// int window = 3; 
+bool selectChannel(uint8_t channel) {
+  Wire.beginTransmission(TCAADDR); Wire.write(1 << channel);
+  return Wire.endTransmission() == 0;
+}
 
-// PID Variables
-double Setpoint, Input, Output;
-double Kp = 50, Ki = 1, Kd = 20; // PID gains - Increased Kp for more drastic turns, adjusted Kd
-PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
+bool freshIMU() {
+  return imuReady && gyroState.calibrated &&
+         (unsigned long)(micros() - gyroState.lastUpdateMicros) < 100000;
+}
 
-int baseSpeed = 180; // Default base speed (0-255)
-const int MIN_DISTANCE = 30; // Minimum distance to obstacle in cm (approx 8 inches) - Increased from 14
-bool pid_active = false; // Flag to enable/disable PID control
+bool clearFor(const char* action) {
+  if (!strcmp(action, "stop")) return true;
+  if (!freshIMU()) return false;
+  // All five must be healthy. Turns sweep the chassis, so check every direction.
+  for (int i = 0; i < 5; ++i) {
+    if (!rangeValid[i] || millis() - rangeAt[i] > SENSOR_MAX_AGE_MS) return false;
+    if ((strcmp(action, "forward") || (i >= 1 && i <= 3)) && rangeMM[i] < CLEARANCE_MM)
+      return false;
+  }
+  return true;
+}
+
+void applyMotion() {
+  if (!strcmp(motion, "stop")) { stopMotors(); return; }
+  bool left = !strcmp(motion, "left");
+  bool right = !strcmp(motion, "right");
+  digitalWrite(leftForward, left ? LOW : HIGH);
+  digitalWrite(leftBackward, left ? HIGH : LOW);
+  digitalWrite(rightForward, right ? LOW : HIGH);
+  digitalWrite(rightBackward, right ? HIGH : LOW);
+  analogWrite(leftPWM, (left || right) ? TURN_PWM : DRIVE_PWM);
+  analogWrite(rightPWM, (left || right) ? TURN_PWM : DRIVE_PWM);
+}
+
+void acceptCommand(char* line) {
+  unsigned long id, ttl;
+  char action[12], extra;
+  if (sscanf(line, "M,%lu,%11[^,],%lu%c", &id, action, &ttl, &extra) != 3) {
+    halt("bad_command"); return;
+  }
+  commandId = id;
+  if (!strcmp(action, "stop")) { halt("commanded"); return; }
+  if (!ttl || ttl > MAX_LEASE_MS) { halt("bad_lease"); return; }
+  const char* selected = !strcmp(action, "forward") ? "forward" :
+                         !strcmp(action, "left") ? "left" :
+                         !strcmp(action, "right") ? "right" : nullptr;
+  if (!selected) { halt("bad_action"); return; }
+  if (!clearFor(selected)) { halt("clearance_or_sensor"); return; }
+  motion = selected; stopReason = "none"; leaseUntil = millis() + ttl;
+  applyMotion();
+}
+
+void readCommands() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == 'x') { halt("emergency_stop"); commandLength = 0; discardCommand = false; continue; }
+    if (c == '\n') {
+      if (!discardCommand && commandLength) {
+        commandBuffer[commandLength] = 0; acceptCommand(commandBuffer);
+      }
+      commandLength = 0; discardCommand = false;
+    } else if (c != '\r') {
+      if (commandLength < sizeof(commandBuffer) - 1 && !discardCommand)
+        commandBuffer[commandLength++] = c;
+      else { halt("bad_command"); discardCommand = true; }
+    }
+  }
+}
+
+// Read only ready measurements. No wait-for-range loops in motor operation.
+void pollRange() {
+  static uint8_t i = 0;
+  if (sensorReady[i] && selectChannel(channels[i])) {
+    uint8_t ready = sensors[i].readReg(VL53L0X::RESULT_INTERRUPT_STATUS);
+    if (sensors[i].last_status != 0) rangeValid[i] = false;
+    else if (ready & 7) {
+      uint16_t mm = sensors[i].readReg16Bit(VL53L0X::RESULT_RANGE_STATUS + 10);
+      bool ok = sensors[i].last_status == 0 && mm > 0 && mm < 8190;
+      sensors[i].writeReg(VL53L0X::SYSTEM_INTERRUPT_CLEAR, 1);
+      rangeValid[i] = ok && sensors[i].last_status == 0;
+      rangeMM[i] = mm; rangeAt[i] = millis();
+    }
+  } else rangeValid[i] = false;
+  i = (i + 1) % 5;
+}
+
+void telemetry() {
+  if (millis() - lastTelemetry < 50) return;
+  lastTelemetry = millis();
+  Serial.printf("{\"protocol\":2,\"uptime_ms\":%lu,\"command_id\":%lu,\"motion\":\"%s\",\"stop_reason\":\"%s\",\"tof_mm\":[",
+                millis(), (unsigned long)commandId, motion, stopReason);
+  for (int i = 0; i < 5; ++i) {
+    if (i) Serial.print(',');
+    if (rangeValid[i] && millis() - rangeAt[i] <= SENSOR_MAX_AGE_MS) Serial.print(rangeMM[i]);
+    else Serial.print("null");
+  }
+  Serial.printf("],\"heading_deg\":%.2f,\"yaw_rate_dps\":%.2f,\"imu_valid\":%s,\"imu_age_ms\":%lu,\"imu_model\":\"%s\"}\n",
+    gyroState.headingDeg, gyroState.rateDps, freshIMU() ? "true" : "false",
+    (unsigned long)(micros() - gyroState.lastUpdateMicros) / 1000, imuModelName);
+}
 
 void setup() {
-  Serial.begin(115200); // Increased baud rate
-  Wire.begin(); // ESP32 default SDA=21, SCL=22
-
-  // Setup MPU interrupt pin
-  pinMode(MPU_INT_PIN, INPUT_PULLUP);
-  
-  // Set motor pins as outputs
-  pinMode(rightForward, OUTPUT);
-  pinMode(rightBackward, OUTPUT);
-  pinMode(leftForward, OUTPUT);
-  pinMode(leftBackward, OUTPUT);
-  pinMode(rightPWM, OUTPUT);
-  pinMode(leftPWM, OUTPUT);
-
-  // Initialize sensors
-  setupSensors();
-
-  imuReady = initializeIMU();
-  if (imuReady) {
-    calibrateGyro();
-    zeroHeading();
-    attachInterrupt(digitalPinToInterrupt(MPU_INT_PIN), onImuDataReady, FALLING);
-    Serial.print(imuModelName);
-    Serial.println(" initialized and calibrated.");
-  } else {
-    Serial.println("Failed to initialize MPU-6050!");
-  }
-
-  // PID setup
-  Setpoint = 0; // Target for steering, 0 means balanced
-  myPID.SetMode(AUTOMATIC);
-  myPID.SetOutputLimits(-255, 255); // PID output will adjust motor speed difference
-
-  // Initialize all motors to stop
+  Serial.begin(115200);
+  pinMode(rightForward, OUTPUT); pinMode(rightBackward, OUTPUT);
+  pinMode(leftForward, OUTPUT); pinMode(leftBackward, OUTPUT);
+  pinMode(rightPWM, OUTPUT); pinMode(leftPWM, OUTPUT);
   stopMotors();
+  Wire.begin(); Wire.setTimeOut(5);
+  for (int i = 0; i < 5; ++i) {
+    if (!selectChannel(channels[i])) continue;
+    sensors[i].setTimeout(100);
+    sensorReady[i] = sensors[i].init();
+    if (sensorReady[i]) {
+      sensors[i].setMeasurementTimingBudget(20000);
+      sensors[i].startContinuous(40);
+    }
+  }
+  imuReady = initializeIMU();
+  if (imuReady) calibrateGyro();
 }
 
 void loop() {
-  if (imuReady) {
-    updateGyro();
-  }
-  // Handle manual serial commands
-  if (Serial.available() > 0) {
-    char command = Serial.read();
-    handleSerialCommand(command);
-  }
-
-  if (pid_active) {
-    // Read sensors
-    selectChannel(7);
-    // int l90 = sensorL90.movingAverage(sensorL90.readRangeSingleMillimeters() / 10); // Using direct read
-    int l90 = sensorL90.readRangeSingleMillimeters() / 10;
-    if (sensorL90.timeoutOccurred()) { Serial.println("L90 TIMEOUT"); l90 = 200; } // Handle timeout, assume max distance
-    selectChannel(6);
-    // int l45 = sensorL45.movingAverage(sensorL45.readRangeSingleMillimeters() / 10);
-    int l45 = sensorL45.readRangeSingleMillimeters() / 10;
-    if (sensorL45.timeoutOccurred()) { Serial.println("L45 TIMEOUT"); l45 = 200; }
-    selectChannel(5);
-    // int front = sensorF.movingAverage(sensorF.readRangeSingleMillimeters() / 10);
-    int front = sensorF.readRangeSingleMillimeters() / 10;
-    if (sensorF.timeoutOccurred()) { Serial.println("F TIMEOUT"); front = 200; }
-    selectChannel(4);
-    // int r45 = sensorR45.movingAverage(sensorR45.readRangeSingleMillimeters() / 10);
-    int r45 = sensorR45.readRangeSingleMillimeters() / 10;
-    if (sensorR45.timeoutOccurred()) { Serial.println("R45 TIMEOUT"); r45 = 200; }
-    selectChannel(3);
-    // int r90 = sensorR90.movingAverage(sensorR90.readRangeSingleMillimeters() / 10);
-    int r90 = sensorR90.readRangeSingleMillimeters() / 10;
-    if (sensorR90.timeoutOccurred()) { Serial.println("R90 TIMEOUT"); r90 = 200; }
-
-    // Avoid division by zero and unrealistic high values (e.g. > 200cm)
-    front = constrain(max(front, 1), 1, 200);
-    l45 = constrain(max(l45, 1), 1, 200);
-    l90 = constrain(max(l90, 1), 1, 200);
-    r45 = constrain(max(r45, 1), 1, 200);
-    r90 = constrain(max(r90, 1), 1, 200);
-
-    // Compute proximity and softmax weights
-    double proxFront = 1.0 / front;
-    double proxL45 = 1.0 / l45;
-    double proxL90 = 1.0 / l90;
-    double proxR45 = 1.0 / r45;
-    double proxR90 = 1.0 / r90;
-    double sumProx = proxFront + proxL45 + proxL90 + proxR45 + proxR90;
-    
-    double wF = proxFront / sumProx;
-    double wL45 = proxL45 / sumProx;
-    double wL90 = proxL90 / sumProx;
-    double wR45 = proxR45 / sumProx;
-    double wR90 = proxR90 / sumProx;
-
-    // Calculate steering input for PID
-    // Positive steering means turn right, negative means turn left
-    double steering = (wR45 + wR90) - (wL45 + wL90); // Match friend's: (LHS) - (RHS) for steering value
-                                                     // If L is smaller (more prox), value is negative (turn left)
-                                                     // If R is smaller (more prox), value is positive (turn right)
-                                                     // My PID output: Positive -> R motor decrease, L motor increase
-
-    Input = steering;
-    myPID.Compute(); // Output will be from -255 to 255
-
-    // Determine current speed based on sensors and baseSpeed
-    int currentSpeed = baseSpeed;
-    bool criticalStop = (front < MIN_DISTANCE / 2); // Very close obstacle directly in front
-
-    if (criticalStop) {
-        currentSpeed = 0; // Immediate stop for very close frontal obstacles
-    } else if (front < MIN_DISTANCE || l45 < MIN_DISTANCE || r45 < MIN_DISTANCE) {
-        currentSpeed = baseSpeed / 2; // Slow down if obstacles are somewhat close, allowing PID to steer
-        // Ensure currentSpeed doesn't go below a minimum operational speed if baseSpeed/2 is too low
-        currentSpeed = max(currentSpeed, 80); // Assuming 80 is a good minimum maneuvering speed
-        if (baseSpeed < 160) currentSpeed = baseSpeed; // Avoid going slower than base if base is already low
-    }
-    // The old stopForObstacle logic is replaced by the above
-
-    int leftMotorSpeed = currentSpeed;
-    int rightMotorSpeed = currentSpeed;
-
-    // Apply PID output to differentiate motor speeds for steering
-    // If Output is positive (turn right command from PID based on friend's steering formula),
-    // we want to slow down the right motor or speed up the left motor.
-    // My convention for moveMotors: higher speed = faster.
-    // Output > 0 means steer right (LHS smaller distances / higher prox) -> left motor faster, right motor slower
-    // Output < 0 means steer left (RHS smaller distances / higher prox) -> right motor faster, left motor slower
-    leftMotorSpeed += Output; 
-    rightMotorSpeed -= Output;
-
-    // Constrain motor speeds
-    // Using friend's constraints (42-127) if moving, else 0. Max can be 255.
-    // Let's use a wider range like 60-200 for ESP32 potentially. For now, use 42-255
-    if (currentSpeed == 0) {
-      leftMotorSpeed = 0;
-      rightMotorSpeed = 0;
-    } else {
-      leftMotorSpeed = constrain(leftMotorSpeed, 80, 255); // Updated min speed to 80
-      rightMotorSpeed = constrain(rightMotorSpeed, 80, 255); // Updated min speed to 80
-    }
-    
-    moveMotors(leftMotorSpeed, rightMotorSpeed, (Output > 0)); // Pass PID output to hint direction if needed
-
-    // Serial output for Python script
-    // Format: L90,L45,F,R45,R90,sW_L90,sW_L45,sW_F,sW_R45,sW_R90,SteeringIn,PID_Out,L_Speed,R_Speed,BaseSpeed,CurSpeed,PID_Active_ESP
-    Serial.print(l90); Serial.print(","); Serial.print(l45); Serial.print(","); Serial.print(front); Serial.print(","); Serial.print(r45); Serial.print(","); Serial.print(r90); Serial.print(",");
-    Serial.print(wL90, 4); Serial.print(","); Serial.print(wL45, 4); Serial.print(","); Serial.print(wF, 4); Serial.print(","); Serial.print(wR45, 4); Serial.print(","); Serial.print(wR90, 4); Serial.print(",");
-    Serial.print(Input, 4); Serial.print(","); Serial.print(Output, 4); Serial.print(",");
-    Serial.print(leftMotorSpeed); Serial.print(","); Serial.print(rightMotorSpeed); Serial.print(",");
-    Serial.print(baseSpeed); Serial.print(","); Serial.print(currentSpeed); Serial.print(","); Serial.println(pid_active ? 1 : 0);
-
-  } // end if(pid_active)
-  
-  delay(50); // Loop delay
+  readCommands();
+  if (strcmp(motion, "stop") && (long)(millis() - leaseUntil) >= 0) halt("lease_expired");
+  updateGyro();
+  pollRange();
+  readCommands();
+  if (strcmp(motion, "stop") && !clearFor(motion)) halt("clearance_or_sensor");
+  telemetry();
+  delay(1);
 }
-
-void handleSerialCommand(char command) {
-  if (imuReady) {
-    updateGyro(true);
-  }
-  switch(command) {
-    case 'w':
-      pid_active = false; // Disable PID for manual control
-      forward();
-      break;
-    case 's':
-      pid_active = false;
-      reverse();
-      break;
-    case 'a':
-      pid_active = false;
-      left_turn();
-      break;
-    case 'd':
-      pid_active = false;
-      right_turn();
-      break;
-    case 'x':
-      pid_active = false;
-      stopMotors();
-      break;
-    case 'p': // Toggle PID
-      pid_active = !pid_active;
-      if (!pid_active) stopMotors(); // Stop if disabling PID
-      Serial.print("PID Active: "); Serial.println(pid_active);
-      break;
-    case '1': baseSpeed = 255 * 0.1; Serial.print("BaseSpeed: "); Serial.println(baseSpeed); break;
-    case '2': baseSpeed = 255 * 0.2; Serial.print("BaseSpeed: "); Serial.println(baseSpeed); break;
-    case '3': baseSpeed = 255 * 0.3; Serial.print("BaseSpeed: "); Serial.println(baseSpeed); break;
-    case '4': baseSpeed = 255 * 0.4; Serial.print("BaseSpeed: "); Serial.println(baseSpeed); break;  
-    case '5': baseSpeed = 255 * 0.5; Serial.print("BaseSpeed: "); Serial.println(baseSpeed); break;
-    case '6': baseSpeed = 255 * 0.6; Serial.print("BaseSpeed: "); Serial.println(baseSpeed); break;
-    case '7': baseSpeed = 255 * 0.7; Serial.print("BaseSpeed: "); Serial.println(baseSpeed); break;
-    case '8': baseSpeed = 255 * 0.8; Serial.print("BaseSpeed: "); Serial.println(baseSpeed); break;
-    case '9': baseSpeed = 255 * 0.9; Serial.print("BaseSpeed: "); Serial.println(baseSpeed); break;
-    case '0': baseSpeed = 255 * 1.0; Serial.print("BaseSpeed: "); Serial.println(baseSpeed); break;
-  }
-}
-
-void stopMotors() { // Renamed from stop()
-  digitalWrite(rightForward, LOW);
-  digitalWrite(rightBackward, LOW);
-  digitalWrite(leftForward, LOW);
-  digitalWrite(leftBackward, LOW);
-  // Ensure PWM is also off
-  analogWrite(rightPWM, 0);
-  analogWrite(leftPWM, 0);
-}
-
-void moveMotors(int leftSpeed, int rightSpeed, bool turningRightHint) {
-  // For now, simple forward differential speed.
-  // Speeds are magnitudes (0-255)
-  // Left Motor
-  digitalWrite(leftForward, HIGH);
-  digitalWrite(leftBackward, LOW);
-  analogWrite(leftPWM, constrain(leftSpeed, 0, 255));
-
-  // Right Motor
-  digitalWrite(rightForward, HIGH);
-  digitalWrite(rightBackward, LOW);
-  analogWrite(rightPWM, constrain(rightSpeed, 0, 255));
-}
-
-void pivotWithoutIMU(int direction, unsigned long durationMs, int speed) {
-  unsigned long start = millis();
-  applyPivot(direction, speed);
-  while (millis() - start < durationMs) {
-    delay(5);
-  }
-  stopMotors();
-  sendTurnStatus(direction >= 0 ? "left" : "right", "no-imu");
-}
-
-void sendTurnStatus(const char* direction, const char* status) {
-  Serial.print("TURN_STATUS:");
-  Serial.print(direction);
-  Serial.print(',');
-  Serial.println(status);
-}
-
-// Manual control functions (will set motors directly, overriding PID if pid_active is false)
-void forward() {
-  digitalWrite(rightForward, HIGH);
-  digitalWrite(rightBackward, LOW);
-  digitalWrite(leftForward, HIGH);
-  digitalWrite(leftBackward, LOW);
-  analogWrite(rightPWM, baseSpeed);
-  analogWrite(leftPWM, baseSpeed);
-}
-
-void reverse() {
-  digitalWrite(rightForward, LOW);
-  digitalWrite(rightBackward, HIGH);
-  digitalWrite(leftForward, LOW);
-  digitalWrite(leftBackward, HIGH);
-  analogWrite(rightPWM, baseSpeed);
-  analogWrite(leftPWM, baseSpeed);
-}
-
-void left_turn() {
-  if (imuReady) {
-    if (!turnDegrees(75.0f)) {
-      Serial.println("IMU turn (left) timed out.");
-    }
-    return;
-  }
-
-}
-
-void right_turn() {
-  if (imuReady) {
-    if (!turnDegrees(-75.0f)) {
-      Serial.println("IMU turn (right) timed out.");
-    }
-    return;
-  }
-
-}
-
-// Function to select I2C channel on TCA9548A
-void selectChannel(uint8_t i2cBus) {
-  if (i2cBus > 7) return;
-  Wire.beginTransmission(TCAADDR);
-  Wire.write(1 << i2cBus);
-  Wire.endTransmission();
-}
-
-// Function to setup sensors
-void setupSensors() {
-  uint8_t channels[] = {7, 6, 5, 4, 3}; // L90, L45, F, R45, R90
-  VL53L0X* sensors[] = {&sensorL90, &sensorL45, &sensorF, &sensorR45, &sensorR90};
-  const char* sensorNames[] = {"L90_CH7", "L45_CH6", "F_CH5", "R45_CH4", "R90_CH3"};
-
-  for (int i = 0; i < 5; ++i) {
-    selectChannel(channels[i]);
-    sensors[i]->setTimeout(200); // Standard timeout from Adafruit library is 500ms, 200 is fine for quicker reads
-    if (!sensors[i]->init()) {
-      Serial.print("Failed to detect and initialize ");
-      Serial.print(sensorNames[i]);
-      Serial.println(" sensor!");
-      // Potentially loop forever or set a flag
-    } else {
-      Serial.print(sensorNames[i]);
-      Serial.println(" initialized.");
-       // Configuration for VL53L0X (example settings, can be tuned)
-      sensors[i]->setMeasurementTimingBudget(20000); // microseconds (20ms = 20000us). Valid range 20ms to 1000ms.
-                                                     // Longer budget for more accuracy, shorter for faster reads.
-      // sensors[i]->setSignalRateLimit(0.1); // Example: advanced tuning, default 0.25 Mcps
-      // sensors[i]->setVcselPulsePeriod(VL53L0X::VcselPeriodPreRange, 18); // Example: advanced tuning
-      // sensors[i]->setVcselPulsePeriod(VL53L0X::VcselPeriodFinalRange, 14); // Example: advanced tuning
-    }
-    // sensors[i]->setWindowSize(window); // Removed, not part of standard VL53L0X library
-  }
-} 
-
-// -----------------------------
-// IMU helper implementations
-// -----------------------------
 
 bool initializeIMU() {
   Wire.beginTransmission(MPU_ADDR);
@@ -552,7 +372,9 @@ void calibrateGyro(int samples) {
   // Allow sensor to settle
   delay(50);
 
+  unsigned long started = millis();
   for (int i = 0; i < maxSamples; ++i) {
+    if (millis() - started > 5000) return;
     if (!readGyroRaw(gx, gy, gz)) {
       delay(2);
       --i;
@@ -592,7 +414,7 @@ bool readGyroRaw(int16_t &gx, int16_t &gy, int16_t &gz) {
 
 void updateGyro(bool force) {
   if (!imuReady) return;
-  if (!imuDataReady && !force) return;
+  if (!force && micros() - gyroState.lastUpdateMicros < 10000) return;
 
   int16_t gx, gy, gz;
   if (!readGyroRaw(gx, gy, gz)) {
@@ -613,7 +435,7 @@ void updateGyro(bool force) {
   float gyroY = (gy - gyroState.bias) / MPU_GYRO_SENS;
   gyroState.rateDps = gyroY;
   gyroState.headingDeg += gyroY * dt;
-  gyroState.headingDeg = normalizeAngle(gyroState.headingDeg);
+  // Keep a continuous startup-relative heading; never reset at each turn.
 }
 
 float getHeadingDegrees() {
@@ -624,112 +446,4 @@ float normalizeAngle(float angle) {
   while (angle > 180.0f) angle -= 360.0f;
   while (angle < -180.0f) angle += 360.0f;
   return angle;
-}
-
-void applyPivot(int direction, int speed) {
-  speed = constrain(speed, 0, 255);
-  if (direction >= 0) { // Positive -> left turn
-    digitalWrite(rightForward, HIGH);
-    digitalWrite(rightBackward, LOW);
-    digitalWrite(leftForward, LOW);
-    digitalWrite(leftBackward, HIGH);
-  } else { // Negative -> right turn
-    digitalWrite(rightForward, LOW);
-    digitalWrite(rightBackward, HIGH);
-    digitalWrite(leftForward, HIGH);
-    digitalWrite(leftBackward, LOW);
-  }
-  analogWrite(rightPWM, speed);
-  analogWrite(leftPWM, speed);
-}
-
-void zeroHeading() {
-  gyroState.headingDeg = 0.0f;
-  gyroState.lastUpdateMicros = micros();
-}
-
-float headingError(float target) {
-  float diff = target - gyroState.headingDeg;
-  return normalizeAngle(diff);
-}
-
-bool turnDegrees(float degrees, int fastSpeed, int slowSpeed, float tolerance) {
-  if (!imuReady || !gyroState.calibrated) {
-    return false;
-  }
-
-  int direction = (degrees >= 0.0f) ? 1 : -1;
-  fastSpeed = constrain(fastSpeed, 80, 255);
-  slowSpeed = constrain(slowSpeed, 60, fastSpeed - 5);
-  float target = degrees;
-  float absTarget = fabs(target);
-
-  zeroHeading();
-  imuDataReady = false;
-
-  unsigned long startTime = millis();
-  unsigned long timeout = max(3000UL, (unsigned long)(fabs(degrees) * 28.0f));
-
-  uint8_t stage = 0; // 0 = soft start, 1 = medium push, 2 = high torque
-
-  while (millis() - startTime < timeout) {
-    updateGyro();
-
-    float error = headingError(target);
-    float absError = fabs(error);
-    float absHeading = fabs(gyroState.headingDeg);
-
-    if (absError <= tolerance) {
-      stopMotors();
-      sendTurnStatus(direction > 0 ? "left" : "right", "done");
-      return true;
-    }
-
-    if (stage == 0 && (absHeading >= absTarget * 0.45f || millis() - startTime > 500)) {
-      stage = 1;
-    }
-    if (stage == 1 && (absHeading >= absTarget * 0.85f || millis() - startTime > 1500)) {
-      stage = 2;
-    }
-
-    int speed;
-    unsigned long pulseOn;
-    unsigned long pulsePause;
-
-    if (stage == 0) {
-      speed = max(slowSpeed - 5, 95);
-      pulseOn = 18;
-      pulsePause = 14;
-    } else if (stage == 1) {
-      speed = max(slowSpeed + 30, 120);
-      pulseOn = 20;
-      pulsePause = 10;
-    } else {
-      speed = min(max(fastSpeed + 50, slowSpeed + 50), 240);
-      pulseOn = 22;
-      pulsePause = 10;
-    }
-
-    if (absError < 18.0f) {
-      speed = max(speed - 10, 100);
-      pulseOn = max(pulseOn - 3, (unsigned long)12);
-      pulsePause += 4;
-    }
-    if (absError < 8.0f) {
-      speed = max(speed - 20, 80);
-      pulseOn = max(pulseOn - 4, (unsigned long)8);
-      pulsePause += 6;
-    }
-
-    applyPivot(direction, speed);
-    delay(pulseOn);
-    stopMotors();
-    delay(pulsePause);
-
-    updateGyro(true); // Force read after each pulse
-  }
-
-  stopMotors();
-  sendTurnStatus(direction > 0 ? "left" : "right", "timeout");
-  return false;
 }
