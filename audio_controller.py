@@ -9,6 +9,8 @@ import time
 from collections import Counter
 
 from robot_schemas import TranscriptQuality
+from runtime_log import record
+from speech_text import plain_speech
 
 WAKE_WORDS = ("robot", "mauricio", "maurice", "spinny", "toad")
 
@@ -96,6 +98,7 @@ class AudioController:
         # This acknowledgement must never complete a mission's talk step.
         self._state("listening")
         self.events.put({"kind": "listening"})
+        record("wake_detected", word=match.group(), transcript=text)
         if not (tts_ready and tts_module.speak("Huh?")):
             logging.warning("Wake acknowledgement playback failed")
         remainder = text[match.end():].strip(' ,.!?')
@@ -129,6 +132,8 @@ class AudioController:
                             self.events.put({"kind": "listening"})
                             continue
                         self._state("talking")
+                        original_text, text = text, plain_speech(text)
+                        record("speech_playback_started", approved_text=original_text, tts_text=text, revision=revision)
                         success = tts_ready and tts_module.speak(text)
                         self.events.put({"kind": "spoken" if success else "speech_failed",
                                          "text": text, "ask": ask, "revision": revision})
@@ -151,6 +156,7 @@ class AudioController:
                         condition_on_previous_text=False)
                 text = result.get("text", "").strip()
                 quality = transcript_quality(result)
+                record("transcription", text=text, quality=quality, command=was_command)
                 if was_command:
                     self.events.put({"kind": "user" if text else "listen_timeout", "text": text, "quality": quality})
                     continue

@@ -130,6 +130,21 @@ diagnostics; `--state PATH` selects
 another store. Decision logs include the sent state, answers and dispatched action.
 They can contain private dialogue and observations; keep them local.
 
+Each run also writes `runtime/sessions/<UTC timestamp>-<PID>.jsonl` without
+rotating away earlier runs. It records raw transcripts and quality, input routing,
+exact Jev request/response pairs (including discarded decisions), LFM prompts and
+outputs, goal approval, speech selection, punctuation-free TTS text, playback
+results, motion dispatch and one-second state snapshots. The camera frames sent
+to LFM are saved as JPEGs in that session's `frames/` directory for visual review.
+No microphone recordings or API credentials are stored. The live Terminal log
+prints the session path at startup. Session files remain local until removed.
+
+The personality startup plan is `config/startup-plan.json`. Run it with
+`--plan config/startup-plan.json --goal "Introduce Mauricio and invite a task"`.
+Punctuation and symbols are removed before speech synthesis; the trace retains
+both the approved text and the words actually sent to TTS.
+
+
 ## Goals and execution
 
 Raw Whisper output and recognition quality go to Jev first. Rejected text never

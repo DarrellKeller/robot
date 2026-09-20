@@ -64,7 +64,8 @@ def questions():
             "May LFM draft spoken replies now, and for what purpose? Use accepted dialogue, goal, vision and outcomes. "
             "Choose none while a raw transcript, goal draft, candidate reply, pending question or speech is awaiting handling. "
             "Also none while audio is talking/listening/transcribing, or this message was already answered. "
-            "Wake listening allows speech. speech_request is an outstanding request approved by Jev. "
+            "Wake listening allows speech. speech_request is an outstanding, unanswered request. "
+            "An explicit speech_request for a new introduction should be fulfilled even if an older introduction exists in dialogue. "
             "A talk instruction is something still to say, not proof of past speech. Avoid repeatedly generating rejected replies.",
             "criteria": SPEECH_TOOLS},
         "speech_choice": {"type": "choice", "instructions":

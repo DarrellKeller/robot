@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, field
 
 from robot_schemas import GoalDraft, SpeechCandidates, SceneDescription
+from runtime_log import record, capture_frame
 
 
 # MLX vision and Whisper share one device; serialize inference, never the control loop.
@@ -123,6 +124,8 @@ class LFMTools:
                       frame, captured_at, heading)
             self.pending[kind] = {"tool": tool, "submitted_at": time.monotonic(), "revision": revision}
             self.jobs.put_nowait(job)
+            record("tool_submitted", kind=kind, tool=tool, state=state, revision=revision,
+                   captured_at=captured_at, heading=heading)
         return True
 
     def status(self):
@@ -139,6 +142,9 @@ class LFMTools:
             output = generate(model, processor, formatted, max_tokens=limit,
                               temperature=temperature, verbose=False, **kwargs)
             text = output.text.strip()
+            record("lfm_generation", kind=job.kind, tool=job.tool, revision=job.revision,
+                   prompt=prompt, temperature=temperature, max_tokens=limit, output=text,
+                   captured_at=job.captured_at, heading=job.heading)
             if not text:
                 raise ValueError("Empty LFM output")
             return text
@@ -146,6 +152,9 @@ class LFMTools:
         if job.kind == "vision":
             frame = job.frame.copy()
             frame.thumbnail((640, 480))
+            frame_path = capture_frame(frame)
+            record("vision_input", frame_path=frame_path, captured_at=job.captured_at,
+                   heading=job.heading, revision=job.revision)
             text = infer(SCENE_PROMPT + "\nShared goal: " + job.state.get("goal", ""),
                          160, images=[frame])
             sentences = re.split(r'(?<=[.!?])\s+', text.strip())[:3]

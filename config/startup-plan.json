@@ -3,7 +3,7 @@
   "steps": [
     {
       "kind": "talk",
-      "instruction": "Say: Mauricio's online—tiny wheels, enormous attitude! What's the mission?",
+      "instruction": "Introduce yourself with this line\nHey it is Mauricio your favorite robot boy what are we doing today",
       "completion": "The introduction and invitation finished playing."
     }
   ]

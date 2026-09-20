@@ -17,6 +17,7 @@ from lfm_tools import Camera, LFMTools
 from mission_store import MissionStore, validate_plan
 from robot_link import RobotLink, allowed_movements, SENSOR_NAMES
 from robot_schemas import Transcript, GoalDraft, SpeechCandidates
+from runtime_log import start_trace, record, close_trace
 
 ROOT = Path(__file__).resolve().parent
 DECISION_MAX_AGE = 0.45
@@ -47,6 +48,8 @@ def choose_movement(answers, state, result_age):
 class Controller:
     def __init__(self, args):
         self.args = args
+        self.trace_handler, self.trace_path = start_trace(args.state.parent)
+        record("session_start", configuration=vars(args))
         self.store = MissionStore(args.state)
         self.client = JevClient()
         self.link = RobotLink(args.port, dry_run=not args.live)
@@ -102,6 +105,8 @@ class Controller:
             if plan["intent"] != "new_goal":
                 raise ValueError("--plan requires a new_goal with at least one step")
             self.store.install(args.goal or "User-supplied plan", plan["steps"])
+            if self.store.step["kind"] == "talk":
+                self.speech_request = self.store.step["instruction"]
         elif args.goal:
             self.on_user(args.goal)
 
@@ -147,7 +152,7 @@ class Controller:
         sensors["rotation"] = "left" if rate > 2 else "right" if rate < -2 else "approximately_stationary"
         state.update(sensors=sensors, allowed_movements=allowed_movements(sensors), vision=vision,
                      hardware_context={
-                         "tof_reliability": "Intermittent usable ranges on this chassis. All five sensors communicate through a mux; out_of_range is not proof of disconnected hardware or clear space.",
+                         "tof_reliability": "ToF readings may be unreliable. All five sensors communicate through a mux; out_of_range is not proof of disconnected hardware or clear space. Assess usable readings against the current scene and recent measurements rather than assuming all readings are faulty.",
                          "unknown_directions": [name for name, value in zip(SENSOR_NAMES, sensors.get("tof_mm", [None] * 5)) if value is None],
                          "navigation_guidance": "Use valid ranges as obstacle evidence and fresh camera observations to assess unknown directions. Prefer brief, observable movements and reassess. Ask the user if the route cannot be judged. Do not repeatedly wait solely because a ToF return is missing.",
                          "heading_reliability": "Gyro heading is relative and drifts; short-term changes are more useful than absolute heading. Translation is not measured."
@@ -174,6 +179,7 @@ class Controller:
             self.store.changed()
             return
         self.pending_transcript = Transcript(text=text, quality=quality or {}).model_dump()
+        record("transcript_pending", transcript=self.pending_transcript, epoch=self.epoch)
         self.store.data["status"] = "screening"
         self.store.changed()
         logging.info("TRANSCRIPT awaiting Jev: %s", text)
@@ -183,6 +189,7 @@ class Controller:
         self.pending_transcript = None
         self.store.data["status"] = self.prior_status
         logging.info("Jev transcript route: %s", route)
+        record("transcript_routed", text=text, route=route, epoch=self.epoch)
         if route == "ignore":
             self.store.outcome("transcript", "rejected_by_jev")
             return
@@ -216,7 +223,11 @@ class Controller:
         frame, captured_at, heading = self.camera.latest()
         if frame is None or time.monotonic() - captured_at > 0.25:
             return False
-        submitted = self.tools.submit("vision", tool, state, self.epoch, frame, captured_at,
+        visual_state = dict(state)
+        step = state.get("current_step") or {}
+        if state.get("activity") != "navigate" and step.get("kind") != "navigate":
+            visual_state["goal"] = ""
+        submitted = self.tools.submit("vision", tool, visual_state, self.epoch, frame, captured_at,
                                       heading, priority=priority)
         if submitted:
             self.next_vision_at = time.monotonic() + 1 / self.args.vision_hz
@@ -236,6 +247,7 @@ class Controller:
 
     def handle_tools(self):
         for result in drain(self.tools.results):
+            record("tool_result", result=result, current_epoch=self.epoch)
             if result["kind"] == "fatal":
                 raise RuntimeError("LFM failed to initialize: " + result["error"])
             if result["revision"] != self.epoch:
@@ -267,6 +279,7 @@ class Controller:
 
     def handle_audio(self):
         for event in drain(self.audio.events):
+            record("audio_event", audio_event=event, current_epoch=self.epoch)
             kind = event["kind"]
             if kind == "user":
                 self.on_user(event["text"], event.get("quality"))
@@ -306,6 +319,7 @@ class Controller:
         try:
             response = future.result()
         except Exception as exc:
+            record("decision_error", error=type(exc).__name__)
             self.link.command("stop")
             self.last_sent = "stop"
             self.api_failures += 1
@@ -314,6 +328,8 @@ class Controller:
             logging.warning("Jev request failed (%s); motors stopped", type(exc).__name__)
             return
         if self.request_epoch != self.epoch or now - self.request_at > DECISION_MAX_AGE:
+            record("decision_discarded", request_epoch=self.request_epoch, current_epoch=self.epoch,
+                   latency_s=now - self.request_at, response=response)
             self.link.command("stop")
             self.last_sent = "stop"
             return
@@ -321,6 +337,8 @@ class Controller:
         self.last_decision_at = now
         state = self.context()  # Fresh sensors and tool state, not request-time state.
         answers = response["answers"]
+        record("jev_decision", request=self.request_state, response=response,
+               latency_s=now - self.request_at, epoch=self.epoch)
         # Decisions refer to the exact pending input/candidates in request_state.
         if self.pending_transcript:
             if self.request_state.get("pending_transcript") == self.pending_transcript:
@@ -337,6 +355,7 @@ class Controller:
                     self.dance_seconds, self.dance_recorded = 0, False
                     self.invalidate()
                     logging.info("GOAL approved by Jev: %s", goal)
+                    record("goal_approved", goal=goal, original_request=original)
                 else:
                     if self.goal_proposal != self.goal_request:
                         self.goal_proposal = self.goal_request
@@ -356,6 +375,7 @@ class Controller:
         if step and step["kind"] == "dance" and action == "forward":
             action = "stop"
         self.last_sent = self.link.command(action)
+        record("motion_dispatch", requested=action, sent=self.last_sent, sensors=state["sensors"])
         if action != self.last_sent:
             self.store.outcome(action, "host_clearance_gate")
         if answers["should_remember"]["noul"] >= YES_THRESHOLD and state["vision"].get("fresh"):
@@ -377,6 +397,7 @@ class Controller:
                     ask = self.speech_purpose == "ask_person_about_situation"
                     if self.audio.speak(selected, ask, self.epoch):
                         logging.info("Jev approved speech candidate %s: %s", choice, selected)
+                        record("speech_approved", choice=choice, text=selected, epoch=self.epoch)
                         self.speech_candidates = []
         elif not self.goal_request:
             speech = answers["lfm_speech_tool"]
@@ -452,6 +473,7 @@ class Controller:
             status_tmp = status_path.with_suffix('.tmp')
             status_tmp.write_text(json.dumps({"updated_at": time.time(), **self.context()}, indent=2))
             status_tmp.replace(status_path)
+            record("state_snapshot", state=self.context())
             self.last_save_at = now
 
     def run(self):
@@ -479,6 +501,7 @@ class Controller:
             self.client.close()
             self.audit.removeHandler(self.audit_handler)
             self.audit_handler.close()
+            close_trace(self.trace_handler)
 
 
 def main():
