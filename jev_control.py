@@ -240,6 +240,8 @@ class Controller:
         # Keep the same typed tool surface. The ask flag wins when the independent
         # speech choice disagrees with the need for a question.
         tool = "ask_person_about_situation" if ask else tool
+        if (state.get("current_step") or {}).get("kind") == "talk" and not ask:
+            tool = "status_update"
         if self.tools.submit("speech", tool, state, self.epoch, priority=0):
             self.speech_pending = True
             self.speech_completes_step = completes_step
@@ -398,7 +400,6 @@ class Controller:
                     self.speech_candidates = []
                     self.speech_pending = False
                     self.last_speech_at = now
-                    self.speech_request = None
                     self.store.outcome("speech", "all_candidates_rejected_by_jev")
                 elif state["audio_state"] not in {"talking", "listening", "transcribing", "disabled"}:
                     selected = self.speech_candidates[int(choice) - 1]

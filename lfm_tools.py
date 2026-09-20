@@ -194,11 +194,11 @@ class LFMTools:
             prompt = [{"role": "system", "content": SPEECH_PROMPT +
                        f"\nTone: {tone}. Speech purpose: {job.tool}.\n" + facts}]
             prompt.extend(context["dialogue"])
-            if job.tool != "answer_user" or not context["dialogue"] or context["dialogue"][-1]["role"] != "user":
-                purpose = {"ask_person_about_situation": "Ask one useful question to help with the current task.",
-                           "status_update": "Say the requested announcement or give a useful task update.",
-                           "celebrate": "Briefly celebrate the recorded completion."}.get(job.tool, "Reply to the accepted request.")
-                prompt.append({"role": "user", "content": purpose})
+            purpose = {"ask_person_about_situation": "Ask one useful question to help with the current task.",
+                       "status_update": "Say the requested announcement or give a useful task update.",
+                       "celebrate": "Briefly celebrate the recorded completion."}.get(job.tool, "Reply to the accepted request.")
+            target = context.get("speech_request") or step.get("instruction") or "Reply to the latest accepted user message"
+            prompt.append({"role": "user", "content": f"{purpose}\nCurrent request: {target}\nOnly say your spoken reply."})
             try:
                 candidate = infer(prompt, 80, temperature=0.8).strip('"').strip()
                 if candidate:

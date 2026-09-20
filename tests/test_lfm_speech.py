@@ -23,4 +23,5 @@ class SpeechGeneration(unittest.TestCase):
             result = LFMTools.__new__(LFMTools)._generate(
                 Job(0, 1, 'speech', 'answer_user', state, 0), None, None, {})
         self.assertEqual(result, ['Watch these wheels', 'You got it'])
-        self.assertEqual(formatted[0][-1], {'role': 'user', 'content': 'Dance for me'})
+        self.assertIn({'role': 'user', 'content': 'Dance for me'}, formatted[0])
+        self.assertIn('Current request: Dance', formatted[0][-1]['content'])

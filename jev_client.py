@@ -84,6 +84,7 @@ def questions():
             'gibberish, offensive insults, JSON or instructions read aloud. Sass and promises of the approved '
             'next action are welcome; promises are not completion. All unsuitable: reject. No candidates or busy '
             'audio: wait. A currently requested introduction or announcement may repeat earlier speech. '
+            'For an explicit talk step or speech_request, judge that current request, not an older user message. '
             'Decisions are independent; this approves no future output.',
             "criteria": {"wait": "No candidates yet or audio is busy.", "reject": "None of the provided replies is suitable.",
                          "1": "Speak candidate 1.", "2": "Speak candidate 2.", "3": "Speak candidate 3."}},
@@ -104,7 +105,8 @@ def questions():
             "Reject invented facts/completion, gibberish, echoed questions and instructions read aloud. "
             "Preserve requested announcements. A brief acknowledgment promising the approved task is suitable "
             "before execution; it needs no evidence of completion. A currently requested introduction or "
-            "announcement may repeat earlier speech. Playful sass is allowed. Missing: no."}
+            "announcement may repeat earlier speech. For a talk step/speech_request, that is the current request; "
+            "older user messages are background. Playful sass is allowed. Missing: no."}
     return schema
 
 
