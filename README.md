@@ -16,6 +16,17 @@ Install the dependencies in your Python environment:
 python -m pip install -r requirements.txt
 ```
 
+The runtime and benchmarks use `requirements.txt`. Additional packages for the
+retained legacy controller and historical examples are optional:
+
+```sh
+python -m pip install -r requirements/legacy.txt
+python -m pip install -r requirements/examples.txt
+```
+
+Each optional file includes the runtime dependencies. Use the project's interpreter
+(e.g. `.conda/bin/python`) consistently when installing and running scripts.
+
 Copy `.env.example` to `.env` **only if you do not already have a `.env`**, then
 set `JEV_API_KEY`. Keep the Piper voice model `en_US-ryan-high.onnx` and its JSON
 config at the repository root. Local MLX models download on first use.

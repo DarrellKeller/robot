@@ -1,16 +1,22 @@
-opencv-python>=4.8.0
-Pillow>=10.0.0
-ollama>=0.1.0
-pyserial>=3.5
-piper-tts>=1.0.0
-numpy>=1.21.0
+# Jev runtime and benchmarks (Apple Silicon / MLX).
+# Install with: python -m pip install -r requirements.txt
+
+# Local vision and language models
 mlx>=0.32.2
 mlx-vlm>=0.7.1
-mlx-whisper
-pyaudio
-requests
-tqdm
-google-generativeai
-python-dotenv
-# Local vision bake-off image processor.
+# Compatible with the Whisper/Numba stack in the robot environment.
+numpy>=1.24,<2.3
+opencv-python>=4.8.0
+Pillow>=10.0.0
+# Required by the LFM image processor, including the runtime vision worker.
 torchvision>=0.29.0
+
+# Speech recognition, synthesis, and microphone access
+mlx-whisper
+piper-tts>=1.4.0
+PyAudio
+
+# Robot communication and configuration
+pyserial>=3.5
+python-dotenv
+requests

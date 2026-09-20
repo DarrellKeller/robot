@@ -45,6 +45,10 @@ Install Python requirements in the project's environment:
 python -m pip install -r requirements.txt
 ```
 
+`requirements.txt` covers the Jev runtime and benchmarks. For the old controller,
+install `requirements/legacy.txt`; for all historical examples, install
+`requirements/examples.txt`. These optional files include the runtime requirements.
+
 Create `.env` (ignored by Git):
 
 ```dotenv

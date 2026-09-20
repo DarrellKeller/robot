@@ -1,0 +1,5 @@
+# All historical examples, including the Ollama and OpenAI-compatible examples.
+-r legacy.txt
+
+openai
+tqdm

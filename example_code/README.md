@@ -2,8 +2,11 @@
 
 These scripts are historical experiments, not the Jev runtime. Read each script's
 configuration before running it; some use a webcam, microphone, speaker, local
-model server, or a serial port. Additional packages such as `openai` may be needed
-for individual examples.
+model server, or a serial port. Install their optional dependencies from the repository root:
+
+```sh
+python -m pip install -r requirements/examples.txt
+```
 
 - `esp32_control.py`: old single-character serial controls. Requires legacy firmware;
   it cannot drive the new protocol-v2 firmware.
