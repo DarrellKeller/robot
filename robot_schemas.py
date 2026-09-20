@@ -53,7 +53,7 @@ class NoulAnswer(Contract):
 
 
 class JevDecisions(Contract):
-    user_route: ChoiceAnswer[Literal['ignore', 'clarify', 'chat', 'goal', 'answer', 'cancel', 'resume']]
+    user_route: ChoiceAnswer[Literal['ignore', 'clarify', 'chat', 'goal', 'steer', 'answer', 'cancel', 'resume']]
     approve_goal: NoulAnswer
     activity: ChoiceAnswer[Literal['wait', 'navigate', 'dance', 'talk', 'listen']]
     movement: ChoiceAnswer[Literal['forward', 'backward', 'left', 'right', 'stop']]

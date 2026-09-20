@@ -15,6 +15,7 @@ from audio_controller import AudioController
 from jev_client import JevClient, YES_THRESHOLD, GOAL_APPROVAL_THRESHOLD, COMPLETION_THRESHOLD
 from lfm_tools import Camera, LFMTools, DEFAULT_LFM_MODEL
 from mission_store import MissionStore, validate_plan
+from navigation_recovery import Recovery
 from robot_link import RobotLink, allowed_movements, SENSOR_NAMES
 from robot_schemas import Transcript, GoalDraft, SpeechCandidates
 from runtime_log import start_trace, record, close_trace
@@ -164,6 +165,7 @@ class Controller:
                      pending_transcript=self.pending_transcript, goal_request=self.goal_request,
                      goal_proposal=self.goal_proposal, speech_candidates=self.speech_candidates,
                      speech_purpose=self.speech_purpose, speech_request=self.speech_request)
+        state["allowed_movements"] = self.store.recovery.allowed(state["allowed_movements"])
         return state
 
     def on_user(self, text, quality=None):
@@ -201,11 +203,18 @@ class Controller:
             self.store.changed()
             return
         self.store.utterance("user", text)
+        if route in {"steer", "answer", "resume"} and self.store.recovery.phase == "help":
+            self.store.recovery = Recovery()
+            self.store.goal_event("recovery_retry", "User supplied guidance or requested resume")
         if route == "cancel":
             self.store.data.update(status="paused", pending_question=None)
         elif route == "resume":
             self.store.data.update(status="active" if self.store.step else "idle", pending_question=None)
-        elif route == "goal":
+        elif route == "steer" and self.store.step:
+            self.store.data.update(steering_advice=text, pending_question=None)
+            self.store.goal_event("steering_advice", text)
+            self.speech_request = text
+        elif route == "goal" or route == "steer":
             self.goal_request = text
             self.store.data.update(status="drafting", pending_question=None)
         elif route == "answer":
@@ -390,6 +399,10 @@ class Controller:
                         self.speech_request = "Ask for a clearer achievable task; the goal was rejected."
                         self.store.outcome("goal", "rejected_by_jev")
             return
+        # A decision made before a phase transition cannot act in the new phase.
+        if ((self.request_state.get("recovery") or {}).get("phase") != (state.get("recovery") or {}).get("phase")):
+            self.last_sent = self.link.command("stop")
+            return
         activity = answers["activity"]
         self.activity = activity["choice"]
         step = self.store.step
@@ -438,7 +451,7 @@ class Controller:
                                                           "step_index": self.store.data["step_index"]}
                     self.store.changed()
             complete = answers["goal_complete"]["noul"] >= COMPLETION_THRESHOLD
-            if (step and complete and not self.speech_pending and
+            if (step and complete and not state.get("recovery") and not self.speech_pending and
                 ((step["kind"] in {"navigate", "goal"} and state["vision"].get("fresh"))
                  or (step["kind"] == "dance" and self.dance_seconds >= 4))):
                 self.advance()
@@ -455,6 +468,22 @@ class Controller:
         self.handle_tools()
         state = self.context()
         self.store.observe_motion(state["sensors"])
+        transition = self.store.recovery.update(state["sensors"], state["vision"], now,
+            enabled=state["status"] == "active" and bool(self.store.step)
+            and not state["awaiting_user_answer"] and state["audio_state"] not in {"listening", "transcribing"}
+            and self.store.step["kind"] in {"navigate", "goal"}
+            and (self.activity == "navigate" or self.store.recovery.phase is not None))
+        if transition:
+            self.store.goal_event("recovery", transition)
+            record("recovery_transition", **transition)
+            if transition["to"] == "help":
+                self.invalidate()
+                self.speech_request = "Ask the user for help making room or repositioning me so I can continue the main task"
+            if transition["to"] is None:
+                self.store.data["steering_advice"] = None
+            if transition["to"] == "observe":
+                self.desired_vision = "describe_scene"
+        state = self.context()
         if (self.store.step and self.activity == "dance" and
             state["sensors"].get("motion") in {"left", "right"} and state["sensors"].get("age_s", 1) < 0.25):
             self.dance_seconds += min(now - self.previous_tick, 0.1)

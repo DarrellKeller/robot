@@ -5,7 +5,10 @@ import copy
 import json
 import os
 import time
+
 from pathlib import Path
+
+from navigation_recovery import Recovery
 
 KINDS = {"navigate", "dance", "talk", "listen", "goal"}
 
@@ -50,6 +53,7 @@ class MissionStore:
             if self.data["status"] in {"active", "screening", "drafting"}:
                 self.data["status"] = "paused"
             self.data["pending_question"] = None
+        self.recovery = Recovery()
         self.revision = 0
         self.step_started = time.monotonic()
         self.segment = None
@@ -70,6 +74,8 @@ class MissionStore:
         self.changed()
 
     def install(self, goal, plan):
+        self.recovery = Recovery()
+        self.data["steering_advice"] = None
         self.data.update(goal=goal[:1000], goal_user_request=goal[:1000], steps=plan, step_index=0, status="active",
                          recent_attempts=[], goal_events=[], pending_question=None, last_outcome="goal_started")
         self.step_started = time.monotonic()
@@ -81,6 +87,8 @@ class MissionStore:
         self.changed()
 
     def advance(self):
+        self.recovery = Recovery()
+        self.data["steering_advice"] = None
         self.data["step_index"] += 1
         self.data["recent_attempts"] = []
         self.data["last_outcome"] = "step_completed"
@@ -133,6 +141,7 @@ class MissionStore:
     def context(self):
         d = copy.deepcopy(self.data)
         d.pop("legacy_dialogue", None)
+        d["recovery"] = self.recovery.context()
         attempts = d["recent_attempts"]
         repeated = len(attempts) >= 2 and attempts[-1] == attempts[-2]
         d.update(current_step=copy.deepcopy(self.step),

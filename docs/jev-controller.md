@@ -347,3 +347,37 @@ command is not exposed to Jev or the normal Python movement API.
 New-task acknowledgment drafts receive the actual accepted request. If the first
 draft fails or is rejected, three short acknowledgment fallbacks are offered once
 for Jev to approve; none bypasses speech approval or claims task completion.
+
+### Temporary obstacle recovery
+
+Recovery preserves the main task. Jev's typed `user_route=steer` attaches route
+advice (for example, “you might want to turn left”) instead of drafting a new goal.
+New goals and completed steps clear that advice. Recovery completion consumes it.
+Both Jev and LFM speech receive the current recovery objective and steering advice.
+
+`navigation_recovery.py` tracks four phases using the existing motor actions:
+
+- **retreat:** Jev chooses backward or stop. Sensors that reported less than
+  30 cm must subsequently report more than 40 cm continuously for 300 ms. Missing
+  readings do not prove clearance; newly detected obstacles join the tracked set.
+- **turn:** Jev chooses left/right/stop using the advice and observed opening.
+  A measured 20-degree heading change ends this short reorientation. A fresh
+  close obstacle returns to retreat without replenishing the reverse budget.
+- **observe:** stop, then require a fresh scene captured after telemetry confirms
+  the turn has stopped. Resume the original task; this does not prove delivery or
+  any other main-task completion.
+- **help:** stop and ask for guidance or repositioning. Enter after three
+  half-second reverse intervals without at least 2 cm clearance improvement,
+  two seconds total reported reverse motion, 1.5 seconds of unsuccessful pivoting,
+  or 20 seconds of active recovery without completion. A Jev-accepted answer,
+  steering instruction or explicit resume allows a new attempt.
+
+These are initial tuning limits, not calibrated travel distances. Motor telemetry
+reports commanded motor activity, not wheel odometry. No rear sensor exists.
+The host filters allowed actions by phase but never chooses or automatically
+sends a reverse/turn command. Existing firmware clearance checks and expiring
+leases remain. Old-phase decisions cannot dispatch actions after a transition,
+and recovery cannot complete the main task. Inactive missions never start recovery.
+Transitions and evidence are recorded as `recovery_transition` events and mission
+`goal_events`; snapshots include compact progress independently of speech errors.
+No firmware update is needed for this host-only change.

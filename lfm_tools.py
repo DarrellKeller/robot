@@ -42,7 +42,7 @@ def language_context(state):
     # Raw/rejected transcripts and internal decision bookkeeping never enter LFM prompts.
     return {key: state.get(key) for key in
             ("goal", "goal_user_request", "current_step", "status", "vision", "memory", "recent_route",
-             "recent_attempts", "goal_events", "pending_question", "speech_request")} | {
+             "recent_attempts", "goal_events", "pending_question", "speech_request", "recovery", "steering_advice")} | {
              "dialogue": [{"role": m["role"], "content": m["text"]}
                           for m in state.get("dialogue", [])[-12:]],
              "sensors": {k: state.get("sensors", {}).get(k) for k in
@@ -189,6 +189,7 @@ class LFMTools:
         vision = context.get("vision") or {}
         step = context.get("current_step") or {}
         facts = (f"Shared goal (requested, not completed): {context.get('goal') or 'none'}.\n"
+                 f"Temporary recovery: {context.get('recovery')}. Steering advice: {context.get('steering_advice')}.\n"
                  f"Current task: {step.get('instruction', 'none')}.\n"
                  f"Scene (fresh={vision.get('fresh', False)}): {vision.get('text', 'unavailable')}.\n"
                  f"Measured motor action: {context['sensors'].get('motion')}.\n"

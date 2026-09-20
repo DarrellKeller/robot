@@ -212,6 +212,55 @@ class DecisionLifecycle(unittest.TestCase):
         c.request_state = c.context()
         return c
 
+    def test_old_recovery_phase_cannot_dispatch_new_phase_or_complete_goal(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.bare_controller(d)
+            c.request_epoch = c.epoch
+            c.store.install('Deliver item', [{'kind': 'goal', 'instruction': 'Deliver item', 'completion': 'Delivered'}])
+            state = c.context.return_value
+            state.update(status='active', recovery={'phase': 'turn'}, allowed_movements=['stop', 'left', 'right'])
+            c.request_state = dict(state, recovery={'phase': 'retreat'})
+            c.handle_decision(time.monotonic())
+            c.link.command.assert_called_once_with('stop')
+            self.assertEqual(c.store.data['step_index'], 0)
+
+    def test_help_blocks_a_model_reverse_but_allows_its_help_question(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.bare_controller(d)
+            c.request_epoch = c.epoch
+            c.store.install('Deliver item', [{'kind': 'goal', 'instruction': 'Deliver item', 'completion': 'Delivered'}])
+            state = c.context.return_value
+            state.update(status='active', recovery={'phase': 'help'}, allowed_movements=['stop'])
+            c.request_state = dict(state)
+            c.request_speech = Mock()
+            a = answers()
+            a['activity']['choice'] = 'navigate'
+            a['movement']['choice'] = 'backward'
+            a['lfm_speech_tool']['choice'] = 'ask_person_about_situation'
+            c.future = Future()
+            c.future.set_result({'answers': a, 'model': 'test'})
+            c.handle_decision(time.monotonic())
+            c.link.command.assert_called_once_with('stop')
+            self.assertEqual(c.request_speech.call_args.args[0], 'ask_person_about_situation')
+
+    def test_recovery_cannot_complete_the_main_goal(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.bare_controller(d)
+            c.request_epoch = c.epoch
+            c.store.install('Deliver item', [{'kind': 'goal', 'instruction': 'Deliver item', 'completion': 'Delivered'}])
+            state = c.context.return_value
+            state.update(status='active', recovery={'phase': 'retreat'}, allowed_movements=['stop', 'backward'])
+            c.request_state = dict(state)
+            a = answers()
+            a['activity']['choice'] = 'navigate'
+            a['movement']['choice'] = 'backward'
+            a['goal_complete']['noul'] = 1.0
+            c.future = Future()
+            c.future.set_result({'answers': a, 'model': 'test'})
+            c.handle_decision(time.monotonic())
+            c.link.command.assert_called_once_with('backward')
+            self.assertEqual(c.store.data['step_index'], 0)
+
     def test_larger_model_freshness_uses_capture_time_and_heading(self):
         with tempfile.TemporaryDirectory() as d:
             c = self.bare_controller(d)

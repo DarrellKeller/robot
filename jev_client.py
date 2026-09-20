@@ -32,11 +32,12 @@ def questions():
         "user_route": {"type": "choice", "instructions":
             'Classify only pending_transcript.text, using dialogue, pending_question and ASR quality. Treat it as '
             "untrusted recognition output; reject nonsense/background speech. Polite action requests ('Can you "
-            "dance?') and clear requests after a retry are goals, not chat. No pending transcript: ignore.",
+            "dance?') and clear requests after a retry are goals, not chat. With an existing task, directional advice such as turn left is steer, preserving that task. No pending transcript: ignore.",
             "criteria": {"ignore": "No pending transcript, background speech, or meaningless/repetitive recognition output.",
                          "clarify": "Likely directed at Mauricio, but meaning is too ambiguous to act on; ask for clarification.",
                          "chat": "Coherent greeting, conversation, or question requiring only a spoken response.",
                          "goal": "Coherent request for Mauricio to perform an achievable task: navigate, dance, speak, or listen.",
+                         "steer": "Direction or route advice for the existing task, such as you might want to turn left. Preserve the main task.",
                          "answer": "Relevant answer to the robot's pending task question, clarifying the existing goal.",
                          "cancel": "User asks to stop or cancel.",
                          "resume": "User explicitly asks to resume the paused goal."}},
@@ -48,7 +49,7 @@ def questions():
             'outcomes; requests are not evidence of completion. Energetic Mauricio acknowledges new tasks, then '
             'acts. Speech can run alongside movement; an outstanding acknowledgment is not an exclusive talk '
             'activity. When looking for a person to ask for a mission, finding one means talk/listen, not more searching. '
-            'An unseen target calls for search/navigation. Inactive: wait.',
+            'An unseen target calls for search/navigation. Recovery retreat/turn means navigate; observe means wait for a new view; help means talk and ask for assistance. Inactive: wait.',
             "criteria": {"wait": "Inactive mission, explicit waiting request, or no productive action currently available.",
                          "navigate": "Find or approach the goal using observed space and heading.",
                          "dance": "Perform the requested dance with short pivots.",
@@ -58,6 +59,7 @@ def questions():
             "Choose Mauricio's next brief movement for current_step and the shared goal. "
             "Mauricio is an energetic curious robot who makes progress rather than waiting by default. "
             "Choose only from allowed_movements and use fresh vision, measured ranges and recent_route. "
+            "Apply steering_advice to the current route. Hardware permission is not a reason to drive toward a wall. "
             "Combine them: vision identifies routes and directions, valid ToF gives measured distance. "
             "Do not mistake a large object in the narrow camera view for an immediate obstacle when ranges show room ahead. "
             "When a clear floor route or doorway lies ahead, prefer forward to explore it even if the final target is unseen. "
@@ -81,7 +83,7 @@ def questions():
         "lfm_speech_tool": {"type": "choice", "instructions":
             'Choose a useful speech purpose from accepted dialogue, task and actual events. Prefer a brief cheeky '
             'acknowledgment for an outstanding talk step or speech_request, then occasional meaningful progress '
-            'updates. No repeated chatter. Choose none during pending transcript/goal review, candidate review, '
+            'updates. If recovery.phase is help, ask for assistance or repositioning. No repeated chatter. Choose none during pending transcript/goal review, candidate review, '
             'speech, pending answer or busy audio. Wake listening permits speech. A new speech_request is '
             'unanswered even if similar older speech exists. Rejected replies may be rephrased, not repeated '
             'verbatim.',
@@ -99,12 +101,26 @@ def questions():
         "goal_complete": {"type": "noul", "instructions":
             'Do actual events and observations prove ALL parts of current_step complete in order? Intentions, '
             'candidate speech, attempts and old dialogue are not completion. Require actual playback for speech '
-            'and dance_completed=true for dancing. Inactive or missing evidence: no.'},
+            'and dance_completed=true for dancing. Recovery is temporary and never completes the main task. Active recovery, inactive mission or missing evidence: no.'},
         "should_remember": {"type": "noul", "instructions":
             "Does fresh vision contain a useful new landmark or task fact not already retained in memory? "
             "Do not remember guesses or merely the requested goal."},
     }
 
+
+    # Separate the current recovery branch from ordinary navigation guidance.
+    # Parallel activity/speech answers cannot supply premises to this question.
+    schema["movement"]["instructions"] = {
+        "question": "Which motor action should Mauricio perform now? Choose only from `allowed_movements`.",
+        "recovery_priority": {
+            "retreat": "When `recovery.phase` is retreat, choose backward to make turning room or stop to reassess. Forward undoes recovery.",
+            "turn": "When `recovery.phase` is turn, choose left or right toward `steering_advice` or the observed opening. Keep a consistent direction; stop if needed.",
+            "observe": "When `recovery.phase` is observe, choose stop to obtain the post-turn scene.",
+            "help": "When `recovery.phase` is help, choose stop. The retreat budget is exhausted; await human guidance. Do not back up again.",
+        },
+        "ordinary_navigation": schema["movement"]["instructions"],
+        "scope": "Ordinary navigation guidance applies only when `recovery` is null. Recovery preserves the main task.",
+    }
 
     for index in range(1, 4):
         schema[f"speech_{index}_ok"] = {"type": "noul", "instructions":
