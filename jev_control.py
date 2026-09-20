@@ -13,7 +13,7 @@ from pathlib import Path
 
 from audio_controller import AudioController
 from jev_client import JevClient, YES_THRESHOLD, GOAL_APPROVAL_THRESHOLD, COMPLETION_THRESHOLD
-from lfm_tools import Camera, LFMTools, DEFAULT_LFM_MODEL
+from lfm_tools import Camera, LFMTools, DEFAULT_LFM_MODEL, DEFAULT_TEXT_MODEL
 from mission_store import MissionStore, validate_plan
 from navigation_recovery import Recovery
 from robot_link import RobotLink, allowed_movements, SENSOR_NAMES
@@ -53,7 +53,7 @@ class Controller:
         self.client = JevClient()
         self.link = RobotLink(args.port, dry_run=not args.live)
         self.camera = None if args.no_camera else Camera(args.camera, lambda: self.link.snapshot().get("heading_deg"))
-        self.tools = LFMTools(model_name=args.lfm_model,
+        self.tools = LFMTools(model_name=args.lfm_model, text_model_name=args.text_model,
                               frame_provider=self.camera.latest if self.camera else None)
         self.audio = AudioController(enabled=not args.no_audio)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jev")
@@ -250,6 +250,9 @@ class Controller:
         tool = "ask_person_about_situation" if ask else tool
         if (state.get("current_step") or {}).get("kind") == "talk" and not ask:
             tool = "status_update"
+        # An answer consumes a pending request; old dialogue is not a new trigger.
+        if tool == "answer_user" and not self.speech_request:
+            return
         if self.tools.submit("speech", tool, state, self.epoch, priority=0):
             self.speech_pending = True
             self.speech_completes_step = completes_step
@@ -273,6 +276,8 @@ class Controller:
             if "error" in result:
                 self.store.outcome(kind, "tool_failed: " + result["error"])
                 logging.warning("LFM %s failed: %s", kind, result["error"])
+                if kind == "vision":
+                    self.observation = {}
                 if kind == "goal":
                     # A failed rewrite must not strand an already accepted request.
                     # Jev still reviews the verbatim request before installation.
@@ -550,8 +555,9 @@ def main():
     parser.add_argument('--camera', type=int, default=0)
     parser.add_argument('--no-camera', action='store_true')
     parser.add_argument('--no-audio', action='store_true')
-    parser.add_argument('--lfm-model', default=DEFAULT_LFM_MODEL, help='Resident MLX vision/language model')
-    parser.add_argument('--vision-hz', type=float, default=0.4, help='Maximum periodic vision submissions per second; one job pending at a time')
+    parser.add_argument('--lfm-model', default=DEFAULT_LFM_MODEL, help='Resident MLX vision model')
+    parser.add_argument('--text-model', default=DEFAULT_TEXT_MODEL, help='Resident MLX-LM instruction model for speech and goal wording')
+    parser.add_argument('--vision-hz', type=float, default=1.0, help='Maximum periodic vision submissions per second; one job pending at a time')
     parser.add_argument('--vision-max-age', type=float, default=VISION_MAX_AGE,
                         help='Maximum observation age from actual frame capture, in seconds')
     parser.add_argument('--decision-hz', type=float, default=4)

@@ -73,8 +73,8 @@ def questions(state=None):
             'Choose a useful speech purpose from accepted dialogue, task and actual events. Prefer a brief cheeky '
             'acknowledgment for an outstanding talk step or speech_request, then occasional meaningful progress '
             'updates. If recovery.phase is help, ask for assistance or repositioning. No repeated chatter. Choose none during pending transcript/goal review, '
-            'speech, pending answer or busy audio. Wake listening permits speech. A new speech_request is '
-            'unanswered even if similar older speech exists. Your choice authorizes one LFM reply for direct playback without a second review.',
+            'speech, pending answer or busy audio. Wake listening permits speech. '
+            'answer_user requires a nonempty speech_request; older user dialogue alone is already handled. A speech_request is unanswered even if similar older speech exists. Your choice authorizes one LFM reply for direct playback without a second review.',
             "criteria": SPEECH_TOOLS},
         "goal_complete": {"type": "noul", "instructions":
             'Do actual events and observations prove ALL parts of current_step complete in order? Intentions, '

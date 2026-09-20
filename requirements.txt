@@ -4,6 +4,7 @@
 # Local vision and language models
 mlx>=0.32.2
 mlx-vlm>=0.7.1
+mlx-lm>=0.31.3
 # Compatible with the Whisper/Numba stack in the robot environment.
 numpy>=1.24,<2.3
 opencv-python>=4.8.0

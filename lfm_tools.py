@@ -1,4 +1,4 @@
-"""One resident MLX model, one inference worker, bounded priority jobs."""
+"""Resident vision and text models, one inference worker, bounded priority jobs."""
 from __future__ import annotations
 
 import copy
@@ -16,7 +16,8 @@ from runtime_log import record, capture_frame
 
 # MLX vision and Whisper share one device; serialize inference, never the control loop.
 LOCAL_INFERENCE_LOCK = threading.RLock()
-DEFAULT_LFM_MODEL = "LiquidAI/LFM2.5-VL-3B-MLX-6bit"
+DEFAULT_LFM_MODEL = "mlx-community/LFM2.5-VL-450M-6bit"
+DEFAULT_TEXT_MODEL = "LiquidAI/LFM2.5-1.2B-Instruct-MLX-8bit"
 
 SCENE_PROMPT = """Describe this camera image in three short factual sentences.
 Include layout, openings, obstacles and relative directions; visible people's clothing, appearance and actions;
@@ -38,13 +39,22 @@ Keep jokes playful; do not insult the user. For a question purpose ask one usefu
 """
 
 
+def scene_description(text):
+    """A refusal is a failed observation, never fresh visual evidence."""
+    normalized = text.replace("’", "'").strip().lower()
+    if re.match(r"^(?:i(?:'m| am) sorry[, ]*(?:but )?)?(?:i(?:'m| am)?\s+)?(?:can't|cannot|unable to|am unable to)\s+(?:assist|help|comply|describe)", normalized):
+        raise ValueError("Vision returned a refusal instead of an observation")
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())[:3]
+    return ' '.join(SceneDescription(sentences=sentences).sentences)
+
+
 def language_context(state):
     # Raw/rejected transcripts and internal decision bookkeeping never enter LFM prompts.
     return {key: state.get(key) for key in
             ("goal", "goal_user_request", "current_step", "status", "vision", "memory", "recent_route",
              "recent_attempts", "goal_events", "pending_question", "speech_request", "recovery", "steering_advice")} | {
              "dialogue": [{"role": m["role"], "content": m["text"]}
-                          for m in state.get("dialogue", [])[-12:]],
+                          for m in state.get("dialogue", [])[-24:]],
              "sensors": {k: state.get("sensors", {}).get(k) for k in
                          ("tof_cm", "motion", "heading_deg", "rotation", "imu_valid")}}
 
@@ -108,8 +118,9 @@ class Camera:
 
 
 class LFMTools:
-    def __init__(self, model_name=DEFAULT_LFM_MODEL, frame_provider=None):
+    def __init__(self, model_name=DEFAULT_LFM_MODEL, frame_provider=None, text_model_name=DEFAULT_TEXT_MODEL):
         self.model_name = model_name
+        self.text_model_name = text_model_name
         self.frame_provider = frame_provider
         self.jobs = queue.PriorityQueue(maxsize=4)
         self.results = queue.Queue()
@@ -138,20 +149,28 @@ class LFMTools:
             return copy.deepcopy(self.pending)
 
     def _generate(self, job, model, processor, config):
-        from mlx_vlm import generate
-        from mlx_vlm.prompt_utils import apply_chat_template
-
         def infer(prompt, limit, temperature=0.0, images=None):
             started = time.monotonic()
-            formatted = apply_chat_template(processor, config, prompt, num_images=1 if images else 0)
-            kwargs = {"image": images} if images else {}
-            # Only inference holds the shared device; control and playback remain independent.
+            # The image model only sees frames; the text model handles dialogue/goals.
             with LOCAL_INFERENCE_LOCK:
-                output = generate(model, processor, formatted, max_tokens=limit,
-                                  temperature=temperature, verbose=False, **kwargs)
-            text = output.text.strip()
+                if images:
+                    from mlx_vlm import generate
+                    from mlx_vlm.prompt_utils import apply_chat_template
+                    formatted = apply_chat_template(processor, config, prompt, num_images=1)
+                    output = generate(model, processor, formatted, image=images, max_tokens=limit,
+                                      temperature=temperature, verbose=False)
+                    text = output.text.strip()
+                else:
+                    from mlx_lm import generate
+                    from mlx_lm.sample_utils import make_sampler, make_logits_processors
+                    formatted = processor.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
+                    text = generate(model, processor, prompt=formatted, max_tokens=limit,
+                                    sampler=make_sampler(temp=temperature, top_k=50),
+                                    logits_processors=make_logits_processors(repetition_penalty=1.05),
+                                    verbose=False).strip()
             record("lfm_generation", kind=job.kind, tool=job.tool, revision=job.revision,
                    prompt=prompt, temperature=temperature, max_tokens=limit, output=text,
+                   model=getattr(self, "model_name", DEFAULT_LFM_MODEL) if images else getattr(self, "text_model_name", DEFAULT_TEXT_MODEL),
                    captured_at=job.captured_at, heading=job.heading,
                    elapsed_s=round(time.monotonic() - started, 3))
             if not text:
@@ -164,10 +183,8 @@ class LFMTools:
             frame_path = capture_frame(frame)
             record("vision_input", frame_path=frame_path, captured_at=job.captured_at,
                    heading=job.heading, revision=job.revision)
-            text = infer(SCENE_PROMPT + "\nShared goal: " + job.state.get("goal", ""),
-                         160, images=[frame])
-            sentences = re.split(r'(?<=[.!?])\s+', text.strip())[:3]
-            return ' '.join(SceneDescription(sentences=sentences).sentences)
+            text = infer(SCENE_PROMPT, 160, images=[frame])
+            return scene_description(text)
         if job.kind == "goal":
             dialogue = "\n".join(f"{m['role']}: {m['text']}" for m in job.state.get("dialogue", [])[-6:])
             text = infer([{"role": "system", "content": GOAL_PROMPT},
@@ -188,6 +205,8 @@ class LFMTools:
         vision = context.get("vision") or {}
         step = context.get("current_step") or {}
         facts = (f"Shared goal (requested, not completed): {context.get('goal') or 'none'}.\n"
+                 f"Remembered observations: {context.get('memory') or []}.\n"
+                 f"Recent route: {context.get('recent_route') or []}.\n"
                  f"Temporary recovery: {context.get('recovery')}. Steering advice: {context.get('steering_advice')}.\n"
                  f"Current task: {step.get('instruction', 'none')}.\n"
                  f"Scene (fresh={vision.get('fresh', False)}): {vision.get('text', 'unavailable')}.\n"
@@ -222,13 +241,15 @@ class LFMTools:
         try:
             from mlx_vlm import load
             from mlx_vlm.utils import load_config
+            from mlx_lm import load as load_text
             name = self.model_name
             with LOCAL_INFERENCE_LOCK:
                 model, processor = load(name)
                 config = load_config(name)
+                text_model, tokenizer = load_text(self.text_model_name)
             ip = processor.image_processor
             ip.max_num_patches = max(ip.max_num_patches, (ip.tile_size // ip.patch_size) ** 2)
-            record("lfm_ready", model=name)
+            record("lfm_ready", vision_model=name, text_model=self.text_model_name)
         except Exception as exc:
             self.results.put({"kind": "fatal", "error": type(exc).__name__})
             return
@@ -242,7 +263,10 @@ class LFMTools:
             started = time.monotonic()
             result["queue_wait_s"] = round(started - job.submitted_at, 3)
             try:
-                result["value"] = self._execute(job, model, processor, config)
+                if job.kind == "vision":
+                    result["value"] = self._execute(job, model, processor, config)
+                else:
+                    result["value"] = self._execute(job, text_model, tokenizer, {})
             except Exception as exc:
                 result["error"] = type(exc).__name__
                 result["message"] = str(exc)

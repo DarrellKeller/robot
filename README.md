@@ -1,12 +1,12 @@
 # Mauricio
 
-An indoor robot using **Jev** for typed decisions, **LFM2.5-VL-3B** for local
-vision and language, **Whisper/Piper** for conversation, and an **ESP32** for
+An indoor robot using **Jev** for typed decisions, **LFM2.5-VL-450M** for local
+vision, **LFM2.5-1.2B Instruct** for speech and goal wording, **Whisper/Piper** for conversation, and an **ESP32** for
 motor control and continuous ToF/MPU feedback.
 
 Movement, vision and speech run independently. Recovery uses the same Jev
 questions with recent outcomes as context. Jev screens transcriptions, approves
-shared goals and selects among three LFM replies. One vision prompt describes the
+shared goals and chooses when to speak. A single LFM reply plays directly. One vision prompt describes the
 scene, people and text in three sentences. Code owns persistence,
 command expiry and sensor checks.
 

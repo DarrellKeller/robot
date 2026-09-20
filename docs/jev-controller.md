@@ -3,7 +3,7 @@
 Jev makes short, typed decisions from ToF, MPU heading, local vision, dialogue,
 subgoals and recent outcomes. Python owns execution and persistence. The ESP32
 owns motor output, continuous sensor acquisition, a command
-watchdog. LFM2.5-VL-3B supplies scene descriptions, spoken replies and short goal drafts.
+watchdog. LFM2.5-VL-450M supplies scene descriptions; LFM2.5-1.2B Instruct supplies spoken replies and short goal drafts.
 Jev screens user input, approves goals, and chooses when and why to speak. LFM generates one reply that goes directly to playback.
 Normal startup begins with fresh goals, dialogue, visual memories and motion
 history, so moving Mauricio to a new location does not carry over an old room.
@@ -98,8 +98,11 @@ state after errors. Never put keys into tracked files or CLI arguments.
 
 Local models:
 
-- Vision, speech text and goal proposals: `LiquidAI/LFM2.5-VL-3B-MLX-6bit`.
-  Override with `--lfm-model MODEL_ID` for comparisons; prompts stay the same.
+- Vision: `mlx-community/LFM2.5-VL-450M-6bit`, configurable with `--lfm-model`.
+- Speech and goal wording: `LiquidAI/LFM2.5-1.2B-Instruct-MLX-8bit`, configurable
+  with `--text-model`. Both models remain resident in one bounded worker.
+  The supported default is Instruct; Thinking has not been integrated or benchmarked
+  for spoken replies (reasoning output would need separate handling).
 - Whisper: `mlx-community/whisper-base.en-mlx`.
 - Piper: place `en_US-ryan-high.onnx` and its JSON config beside `tts_module.py`.
 
@@ -145,7 +148,7 @@ Other options:
 python autonomous_control.py --help
 python autonomous_control.py --no-audio --no-camera --duration 10
 python autonomous_control.py --live --resume
-python autonomous_control.py --vision-hz 0.4 --vision-max-age 5
+python autonomous_control.py --vision-hz 1.0 --vision-max-age 5
 ```
 
 Use a wake word such as “robot” or “Mauricio.” A command can follow the wake word
@@ -194,8 +197,8 @@ four seconds of reported pivot motion. This is reactive navigation, not a mapped
 path planner.
 
 One vision prompt requests three short sentences covering scene geometry, obstacles,
-people's visible appearance/actions, and readable text, with the shared goal as
-search context. The same observation runs during idle conversation and active goals.
+people's visible appearance/actions, and readable text. Vision receives the image
+and scene prompt only; raw transcripts, goals and dialogue never enter this prompt. The same observation runs during idle conversation and active goals.
 There are no separate goal-search, person-inspection or text-reading tools.
 
 Jev authorizes one speech generation through `lfm_speech_tool`. LFM's reply plays
@@ -205,10 +208,10 @@ is recorded before a talk step completes.
 
 Jev gets up to 24 accepted messages (roughly 12 exchanges), the shared goal,
 current observation, ToF/MPU feedback, eight route segments, six outcomes, twelve
-remembered observations and up to 24 goal events. LFM speech gets the last 12 accepted
+remembered observations and up to 24 goal events. LFM speech gets the same last 24 accepted
 messages, the same goal/current task, scene freshness, measured motor state, six
-recent goal events and three outcomes. Goal rewriting uses the last six accepted
-messages plus the approved request. Vision uses the image and shared goal. Pydantic validates goal drafts, exactly three nonempty spoken replies, transcription
+recent goal events, remembered observations, recent route and three outcomes. Goal rewriting uses the last six accepted
+messages plus the approved request. Vision uses only the image and scene prompt. Pydantic validates goal drafts, one nonempty spoken reply, transcription
 quality and every returned Jev decision. Validation enforces shape, not truth; Jev
 approval is a separate gate. Neither
 model keeps hidden conversation memory between calls. Version-1 unscreened dialogue
@@ -255,17 +258,18 @@ Initial settings are deliberately explicit and need chassis testing:
   continuously. The worker selects the latest frame after acquiring the inference
   lock, so speech/Whisper queue delays do not send an old queued image. Capture
   timestamp and heading remain attached to the result; completion never resets age.
-- Periodic vision requests default to at most 0.4 Hz. Only one vision job can be
+- Periodic vision requests default to at most 1 Hz. Only one vision job can be
   pending, and Jev can request a fresh view when that slot is available. A request
   does not interrupt inference. This is an upper submission rate, not a promise
   of constant throughput while speech or transcription occupies the same device.
-- On this 16 GB Mac, six saved-frame runs of the 3B 6-bit model with the existing
-  three-sentence prompt took 2.2–2.7 s each. Three speech candidates took 2.3–3.0 s;
-  isolated MLX peak allocation was 3.51 GB. These are replay timings, not a live
-  navigation validation. The 5 s freshness window accommodates inference without
-  treating the scene as current indefinitely. Longer contention may still stop
-  movement until a new view arrives. Jev decisions remain scheduled at 4 Hz,
-  independent of vision; firmware obstacle stops and telemetry timing are unchanged.
+- On this 16 GB Mac, a motor-free check of the split worker on three frames
+  from the failed run produced scene descriptions in 0.54–0.65 s; a fourth vision
+  request after conversation took 0.65 s. Instruct replies took 0.79–0.88 s and
+  goal rewriting 0.96 s. Peak MLX allocation was 2.18 GB. This small replay is not
+  live navigation validation or an accuracy benchmark. One memory check recalled
+  the reported red envelope and Jules, but added an unsupported flourish; the
+  model can still invent details. The previous 3B vision replay took 2.2–2.7 s.
+  Jev decisions remain scheduled at 4 Hz independently of local inference.
 - Host: rechecks fresh sensors at dispatch; stops when telemetry is older than
   250 ms. Stops after 500 ms without a usable decision.
 - Firmware: each motion lease is 600 ms; maximum accepted lease is 650 ms.
@@ -392,3 +396,21 @@ For navigation-capable steps, a talk activity no longer suppresses an independen
 movement choice. Listen/wait activities and explicit talk-only steps still stop.
 Motion logs include the raw model choice and dispatch constraints so a model
 stop can be distinguished from a host override.
+
+### Scene validity and reply lifecycle
+
+Known refusal phrases at the start of a vision response are treated as a failed
+observation, not scene evidence. A failed vision job clears the previous current
+observation; fresh capture alone cannot make a refusal usable. This catches the
+observed failure, not every possible invalid description. It never screens spoken
+replies. Vision error details and the raw output remain in the session log.
+
+`answer_user` requires a pending `speech_request`. Actual playback clears that
+request, so Jev cannot repeatedly answer old dialogue. A new accepted user message
+can create a new request, including an intentional request to repeat. Other speech
+purposes remain Jev-controlled. No content approval has been restored.
+
+Conversation continuity is application-owned: shared goals, the last 24 accepted
+messages, observations and events are passed to Instruct each time. Changing to a
+Thinking model would not itself add persistent memory. Memory still starts fresh
+on a normal reboot.

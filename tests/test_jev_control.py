@@ -475,6 +475,25 @@ class DecisionLifecycle(unittest.TestCase):
             self.assertEqual(c.store.data['goal'], 'Find table')
             self.assertEqual(c.speech_request, 'Did you get what I was saying?')
 
+    def test_answered_request_cannot_retrigger_answer_generation(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.bare_controller(d)
+            c.speech_request = None
+            c.request_speech('answer_user', c.context())
+            c.tools.submit.assert_not_called()
+            c.speech_request = 'Where are you going'
+            c.request_speech('answer_user', c.context())
+            c.tools.submit.assert_called_once()
+
+    def test_failed_visual_observation_invalidates_previous_scene(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.bare_controller(d)
+            c.observation = {'text': 'Old doorway', 'captured_at': time.monotonic()}
+            c.tools.results = __import__('queue').Queue()
+            c.tools.results.put({'kind': 'vision', 'revision': c.epoch, 'error': 'ValueError'})
+            c.handle_tools()
+            self.assertEqual(c.observation, {})
+
     def test_authorized_speech_plays_without_second_jev_review(self):
         with tempfile.TemporaryDirectory() as d:
             c = self.bare_controller(d)
