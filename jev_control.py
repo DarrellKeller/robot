@@ -485,6 +485,9 @@ class Controller:
                 if self.args.duration and time.monotonic() - started >= self.args.duration:
                     break
                 time.sleep(0.02)
+        except Exception as exc:
+            record("controller_error", error=type(exc).__name__, message=str(exc))
+            raise
         finally:
             self.close()
 

@@ -5,6 +5,11 @@
       "kind": "talk",
       "instruction": "Introduce yourself with this line\nHey it is Mauricio your favorite robot boy what are we doing today",
       "completion": "The introduction and invitation finished playing."
+    },
+    {
+      "kind": "goal",
+      "instruction": "Look around for an objective using brief pivots and fresh observations. Identify something visible and achievable to investigate or find a person to ask for a mission. Explain the proposed objective or ask what to do and listen. Only approach along a visually assessed clear route. If no useful objective or assessable route is apparent stay stopped and ask the user for a task.",
+      "completion": "A meaningful next objective has been identified and communicated or supplied by the user."
     }
   ]
 }
