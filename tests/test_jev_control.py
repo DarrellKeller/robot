@@ -13,6 +13,7 @@ from jev_client import questions, validate_answers
 from jev_control import Controller, choose_movement
 from mission_store import MissionStore, validate_plan
 from robot_link import RobotLink, allowed_movements, parse_telemetry
+from audio_controller import AudioController
 
 
 def telemetry(**changes):
@@ -27,6 +28,34 @@ def answers():
     return {name: ({"type": "noul", "noul": 0.1} if q["type"] == "noul" else
                    {"type": "choice", "choice": next(iter(q["criteria"])), "confidence": 0.95})
             for name, q in questions().items()}
+
+
+class WakeAcknowledgement(unittest.TestCase):
+    def test_acknowledgement_stops_first_and_does_not_complete_talk(self):
+        audio = AudioController(enabled=False)
+        tts = Mock()
+        def speak(text):
+            self.assertEqual(text, 'Huh?')
+            self.assertEqual(audio.status(), 'listening')
+            self.assertEqual(audio.events.get_nowait(), {'kind': 'listening'})
+            return True
+        tts.speak.side_effect = speak
+        self.assertTrue(audio._handle_wake('Mauricio!', True, tts))
+        self.assertTrue(audio.events.empty())
+
+    def test_same_utterance_command_is_preserved(self):
+        audio = AudioController(enabled=False)
+        self.assertFalse(audio._handle_wake('Robot, stop.', True, Mock()))
+        self.assertEqual(audio.events.get_nowait()['kind'], 'listening')
+        self.assertEqual(audio.events.get_nowait(), {'kind': 'user', 'text': 'stop'})
+        self.assertTrue(audio.events.empty())
+
+    def test_unrelated_speech_does_not_acknowledge(self):
+        audio = AudioController(enabled=False)
+        tts = Mock()
+        self.assertFalse(audio._handle_wake('Hello there', True, tts))
+        tts.speak.assert_not_called()
+        self.assertTrue(audio.events.empty())
 
 
 class Boundaries(unittest.TestCase):
@@ -209,6 +238,21 @@ class DecisionLifecycle(unittest.TestCase):
             c.store.install('Say hello', [{'kind': 'talk', 'instruction': 'Hello', 'completion': 'Spoken'}])
             c.handle_audio()
             self.assertEqual(c.store.data['step_index'], 0)
+
+    def test_plan_failure_asks_for_retry_without_advancing(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.bare_controller(d)
+            c.tools = Mock()
+            c.tools.results = __import__('queue').Queue()
+            c.tools.results.put({'kind': 'plan', 'revision': c.epoch, 'error': 'ValueError'})
+            c.audio = Mock()
+            c.audio.speak.return_value = True
+            c.speech_completes_step = True
+            c.handle_tools()
+            self.assertEqual(c.store.data['status'], 'paused')
+            self.assertFalse(c.speech_completes_step)
+            self.assertTrue(c.speech_pending)
+            self.assertEqual(c.audio.speak.call_args.args[1:], (True, c.epoch))
 
 
 if __name__ == '__main__':

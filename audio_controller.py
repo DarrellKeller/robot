@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import queue
+import logging
 import re
 import threading
 import time
@@ -73,6 +74,23 @@ class AudioController:
             stream.close()
         return np.concatenate(chunks) if chunks and voiced else None
 
+    def _handle_wake(self, text, tts_ready, tts_module):
+        match = re.search(r'\b(' + '|'.join(WAKE_WORDS) + r')\b', text, re.I)
+        if not match:
+            return False
+        logging.info("Wake word detected: %s", match.group())
+        # Stop before acknowledging; capture has already closed the microphone.
+        # This acknowledgement must never complete a mission's talk step.
+        self._state("listening")
+        self.events.put({"kind": "listening"})
+        if not (tts_ready and tts_module.speak("Huh?")):
+            logging.warning("Wake acknowledgement playback failed")
+        remainder = text[match.end():].strip(' ,.!?')
+        if remainder:
+            self.events.put({"kind": "user", "text": remainder})
+            return False
+        return True
+
     def _run(self):
         interface = None
         try:
@@ -120,14 +138,7 @@ class AudioController:
                 if was_command:
                     self.events.put({"kind": "user" if text else "listen_timeout", "text": text})
                     continue
-                match = re.search(r'\b(' + '|'.join(WAKE_WORDS) + r')\b', text, re.I)
-                if match:
-                    remainder = text[match.end():].strip(' ,.!?')
-                    if remainder:
-                        self.events.put({"kind": "user", "text": remainder})
-                    else:
-                        self.events.put({"kind": "listening"})
-                        listen_next = True
+                listen_next = self._handle_wake(text, tts_ready, tts_module)
         except Exception as exc:
             self.events.put({"kind": "audio_error", "error": type(exc).__name__})
         finally:

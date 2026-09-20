@@ -190,6 +190,11 @@ class Controller:
                 self.store.outcome(kind, "tool_failed: " + result["error"])
                 if kind == "plan":
                     self.store.data["status"] = "paused"
+                    self.speech_completes_step = False
+                    self.speech_pending = self.audio.speak(
+                        "I heard you, but couldn't work out your request. Could you say it again?",
+                        True, self.epoch)
+                    self.speech_requested_at = time.monotonic()
                 if kind == "speech":
                     self.speech_pending = False
                     self.last_speech_at = time.monotonic()
