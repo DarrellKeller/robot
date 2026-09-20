@@ -62,14 +62,10 @@ class Boundaries(unittest.TestCase):
     def test_stale_connection_or_imu_cannot_move(self):
         for data in ({}, telemetry(age_s=0.3), telemetry(imu_valid=False), telemetry(imu_age_ms=101)):
             self.assertEqual(allowed_movements(data), ["stop"])
-        self.assertEqual(allowed_movements(telemetry(tof_mm=[100, 900, 900, 900, 900])), ["stop", "forward"])
-        self.assertEqual(allowed_movements(telemetry(tof_mm=[900, 900, 100, 900, 900])), ["stop", "backward"])
 
-    def test_missing_tof_does_not_veto_motion_but_detected_obstacles_do(self):
-        for ranges in ([900, None, 900, 900, 900], [None] * 5):
+    def test_tof_is_model_evidence_not_a_local_motion_veto(self):
+        for ranges in ([900, None, 900, 900, 900], [None] * 5, [37, 30, 20, 30, 37]):
             self.assertEqual(allowed_movements(telemetry(tof_mm=ranges)), ['stop', 'forward', 'left', 'right', 'backward'])
-        self.assertEqual(allowed_movements(telemetry(tof_mm=[None, None, 100, None, None])), ['stop', 'backward'])
-        self.assertEqual(allowed_movements(telemetry(tof_mm=[100, None, None, None, None])), ['stop', 'forward'])
 
     def test_reject_legacy_and_malformed_packets(self):
         for packet in ('1,2,3,4,5', '{}', '[]', json.dumps(telemetry(heading_deg=float('nan'))),
@@ -83,10 +79,12 @@ class Boundaries(unittest.TestCase):
         link.latest, link.received_at = telemetry(), time.monotonic()
         self.assertEqual(link.command('forward'), 'forward')
         link.latest['tof_mm'][2] = 100
-        self.assertEqual(link.command('forward'), 'stop')
-        self.assertIn(b',stop,600\n', link.serial.write.call_args.args[0])
+        self.assertEqual(link.command('forward'), 'forward')
         self.assertEqual(link.command('backward'), 'backward')
         self.assertIn(b',backward,250\n', link.serial.write.call_args.args[0])
+        link.received_at -= 1
+        self.assertEqual(link.command('forward'), 'stop')
+        self.assertIn(b',stop,600\n', link.serial.write.call_args.args[0])
 
     def test_transient_write_failure_does_not_kill_controller(self):
         link = RobotLink(dry_run=True)
@@ -144,7 +142,11 @@ class Persistence(unittest.TestCase):
             self.assertEqual(store.data['recent_route'][0]['heading_change_deg'], 20)
             self.assertEqual(store.data['recent_route'][0]['translation'], 'unmeasured')
             store.save()
-            reloaded = MissionStore(path)
+            fresh = MissionStore(path)
+            self.assertEqual(fresh.data['goal'], '')
+            for key in ('dialogue', 'memory', 'recent_route', 'recent_attempts', 'goal_events'):
+                self.assertEqual(fresh.data[key], [])
+            reloaded = MissionStore(path, load_saved=True)
             self.assertEqual(reloaded.data['status'], 'paused')
             self.assertEqual(reloaded.step['instruction'], 'Find table')
 
@@ -404,6 +406,18 @@ class DecisionLifecycle(unittest.TestCase):
             c.future.set_result({'answers':a, 'model':'test'})
             c.handle_decision(time.monotonic())
             c.audio.speak.assert_called_once_with('Two', False, c.epoch)
+
+    def test_failed_acknowledgment_offers_fallback_once_for_jev_review(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.bare_controller(d)
+            c.acknowledgment_needed = True
+            c.offer_acknowledgment_fallback()
+            self.assertEqual(len(c.speech_candidates), 3)
+            self.assertTrue(c.speech_pending)
+            c.audio.speak.assert_not_called()
+            c.speech_candidates = []
+            c.offer_acknowledgment_fallback()
+            self.assertEqual(c.speech_candidates, [])
 
     def test_jev_cannot_approve_candidates_it_has_not_seen(self):
         with tempfile.TemporaryDirectory() as d:

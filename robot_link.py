@@ -11,7 +11,6 @@ import time
 ACTIONS = {"stop", "forward", "backward", "left", "right"}
 SENSOR_NAMES = ("L90", "L45", "F", "R45", "R90")
 TELEMETRY_MAX_AGE = 0.25
-CLEARANCE_MM = 300
 LEASE_MS = 600
 
 
@@ -44,19 +43,8 @@ def allowed_movements(snapshot):
     if (not snapshot or snapshot.get("age_s", float("inf")) > TELEMETRY_MAX_AGE
         or not snapshot.get("imu_valid") or snapshot.get("imu_age_ms", 1000) >= 100):
         return ["stop"]
-    ranges = snapshot["tof_mm"]
-    allowed = ["stop"]
-    # Missing returns are unknown, not a blanket motor veto. Jev also sees
-    # the missing directions and current vision before choosing any movement.
-    if not any(v is not None and v < CLEARANCE_MM for v in ranges[1:4]):
-        allowed.append("forward")
-    if not any(v is not None and v < CLEARANCE_MM for v in ranges):
-        allowed.extend(("left", "right"))
-    # Retreat away from a front obstacle. Rear clearance is not measured;
-    # Jev must use recent route evidence, with a shorter command lease.
-    if not any(ranges[i] is not None and ranges[i] < CLEARANCE_MM for i in (0, 4)):
-        allowed.append("backward")
-    return allowed
+    # ToF is evidence for Jev, not a local distance veto.
+    return ["stop", "forward", "left", "right", "backward"]
 
 
 class RobotLink:

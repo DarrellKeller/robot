@@ -2,9 +2,13 @@
 
 Jev makes short, typed decisions from ToF, MPU heading, local vision, dialogue,
 subgoals and recent outcomes. Python owns execution and persistence. The ESP32
-owns motor output, continuous sensor acquisition, clearance checks and a command
+owns motor output, continuous sensor acquisition, a command
 watchdog. LFM2.5-VL-450M supplies scene descriptions, candidate replies and short goal drafts.
 Jev screens user input, approves goals, and selects every generated reply before playback.
+Normal startup begins with fresh goals, dialogue, visual memories and motion
+history, so moving Mauricio to a new location does not carry over an old room.
+Only `--resume` explicitly restores saved mission context. Per-run diagnostic
+logs remain on disk and are not fed back into either model automatically.
 With audio enabled, a newly approved task requests a brief cheeky acknowledgment.
 Acknowledgment generation and playback do not block valid movement; speech
 and movement can run concurrently. Explicit `talk` steps still require actual playback to complete.
@@ -47,14 +51,14 @@ question holds motion until answered or listening times out.
 
 Recovery adds no questions: recent attempts, interruption reasons, repeated
 failures and a step-overdue event become input to these same questions. Firmware
-sensor/clearance stops never depend on a model's answer.
+emergency stop and command expiry never depend on a model's answer.
 
 Choice answers select among actions; their confidence is logged but is not a
 blanket permission-to-act threshold. Noul approval thresholds live in
 `jev_client.py`: 0.8 for speech grounding and other yes/no gates, and 0.9 for
 goal approval and completion. Movement still requires an active mission, fresh
-vision and decision, no pending answer or active listening, and live hardware
-clearance. A visible clear floor route favors forward exploration even when
+vision and decision, no pending answer or active listening, and fresh hardware
+telemetry. A visible clear floor route favors forward exploration even when
 the final target is unseen. Pivots align with openings; they do not make travel
 progress. Action descriptions specify both wheels' directions and expected
 camera-view changes, matching `main`'s forward/reverse/applyPivot wiring.
@@ -264,14 +268,13 @@ Initial settings are deliberately explicit and need chassis testing:
   `ok`, `out_of_range`, `timeout`, `i2c_error`, `mux_error`, `init_failed`, and `stale`.
   Startup sensor timeout matches main at 200 ms; runtime polls remain bounded
   at 30 ms per phase. MPU is polled during turns too.
-- Motion requires fresh telemetry and a fresh calibrated MPU. Missing ToF returns
-  no longer veto movement: they remain unknown, and Jev must assess the route from
-  fresh vision. Detected obstacles still stop motion at 300 mm: forward checks the
-  three forward-facing sensors; pivots check valid returns from all five.
-  This cannot guarantee obstacle detection in directions with missing readings.
-  Reverse is not exposed because rear coverage is absent. PWM defaults to 100.
-- Confidence settings (0.75 choices, 0.8 Nouls, 0.9 completion) are initial
-  policy settings, not empirically established reliability guarantees.
+- Motion requires fresh telemetry and a fresh calibrated MPU. ToF readings are
+  supplied to Jev as evidence; neither Python nor firmware removes movement
+  choices based on a distance threshold. Jev chooses when to stop or retreat.
+  Command expiry and emergency stop remain enforced locally. Forward/reverse
+  PWM is 180, matching main's default; pivot PWM is 100.
+- Choice confidence is logged, not used as a blanket veto. Noul thresholds
+  remain 0.8 for speech approval and 0.9 for goal approval/completion.
 
 Host command (newline terminated):
 
@@ -310,7 +313,7 @@ References: [TypeSafe architecture](https://docs.typesafe.ai/concepts/how-to-bui
 [Jev limitations](https://docs.typesafe.ai/model-jaggedness/jev-1.13),
 [Pololu VL53L0X library](https://github.com/pololu/vl53l0x-arduino).
 
-Backward movement uses a 250 ms renewable lease and checks measured side clearance.
+Backward movement uses a 250 ms renewable lease; Jev evaluates clearance.
 The robot has no rear range sensor; Jev is instructed to retreat briefly over
 recently traversed space and reassess. Front obstacles do not prevent retreat.
 Whisper metadata is normalized before validation; transcription failures are
@@ -318,6 +321,10 @@ logged and the listener continues instead of silently terminating.
 
 For a manually supervised test with wheels held off the ground,
 `WHEEL_TEST,6000` runs both wheels forward at DRIVE_PWM for up to 6000 ms,
-ignoring ToF only during that run. The firmware lease stops it automatically;
-`x` stops it immediately. A normal command also ends the ToF bypass. This
+without model decisions. The firmware lease stops it automatically;
+`x` stops it immediately. This
 command is not exposed to Jev or the normal Python movement API.
+
+New-task acknowledgment drafts receive the actual accepted request. If the first
+draft fails or is rejected, three short acknowledgment fallbacks are offered once
+for Jev to approve; none bypasses speech approval or claims task completion.

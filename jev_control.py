@@ -48,7 +48,7 @@ class Controller:
         self.args = args
         self.trace_handler, self.trace_path = start_trace(args.state.parent)
         record("session_start", configuration=vars(args))
-        self.store = MissionStore(args.state)
+        self.store = MissionStore(args.state, load_saved=args.resume)
         self.client = JevClient()
         self.link = RobotLink(args.port, dry_run=not args.live)
         self.camera = None if args.no_camera else Camera(args.camera, lambda: self.link.snapshot().get("heading_deg"))
@@ -109,6 +109,8 @@ class Controller:
             self.on_user(args.goal)
 
     def invalidate(self):
+        self.acknowledgment_needed = False
+        self.acknowledgment_fallback_used = False
         self.epoch += 1
         self.audio.invalidate(self.epoch)
         self.last_decision_at = 0
@@ -245,6 +247,16 @@ class Controller:
             self.speech_completes_step = completes_step
             self.speech_requested_at = time.monotonic()
 
+    def offer_acknowledgment_fallback(self):
+        if not getattr(self, "acknowledgment_needed", False) or getattr(self, "acknowledgment_fallback_used", False):
+            return
+        self.acknowledgment_fallback_used = True
+        self.speech_candidates = ["Got it let me try that", "Okay I heard you", "All right I will give it a go"]
+        self.speech_purpose = "answer_user"
+        self.speech_pending = True
+        self.speech_requested_at = time.monotonic()
+        record("acknowledgment_fallback", candidates=self.speech_candidates, epoch=self.epoch)
+
     def handle_tools(self):
         for result in drain(self.tools.results):
             record("tool_result", result=result, current_epoch=self.epoch)
@@ -263,6 +275,7 @@ class Controller:
                 if kind == "speech":
                     self.speech_pending = False
                     self.last_speech_at = time.monotonic()
+                    self.offer_acknowledgment_fallback()
                 continue
             value = result["value"]
             if kind == "vision":
@@ -296,6 +309,7 @@ class Controller:
                     self.store.outcome("speech", "playback_failed")
                     continue
                 self.store.utterance("assistant", event["text"])
+                self.acknowledgment_needed = False
                 self.store.goal_event("spoken", event["text"])
                 self.speech_request = None
                 logging.info("SPOKEN: %s", event["text"])
@@ -356,7 +370,8 @@ class Controller:
                     self.dance_seconds, self.dance_recorded = 0, False
                     self.invalidate()
                     if self.audio.enabled:
-                        self.speech_request = "Briefly acknowledge the accepted task in Mauricio's cheeky voice. Say what you will do next without claiming completion."
+                        self.speech_request = original
+                        self.acknowledgment_needed = True
                         # The approved goal already authorizes this reversible
                         # draft. Jev still selects and approves actual playback.
                         self.request_speech("answer_user", self.context())
@@ -398,6 +413,7 @@ class Controller:
                     self.speech_pending = False
                     self.last_speech_at = now
                     self.store.outcome("speech", "all_candidates_rejected_by_jev")
+                    self.offer_acknowledgment_fallback()
                 elif state["audio_state"] not in {"talking", "listening", "transcribing", "disabled"}:
                     selected = self.speech_candidates[int(choice) - 1]
                     ask = self.speech_purpose == "ask_person_about_situation"

@@ -30,12 +30,12 @@ def validate_plan(value):
 
 
 class MissionStore:
-    def __init__(self, path):
+    def __init__(self, path, *, load_saved=False):
         self.path = Path(path)
         self.data = {"version": 2, "goal": "", "steps": [], "step_index": 0,
                      "status": "idle", "memory": [], "dialogue": [], "recent_attempts": [],
                      "recent_route": [], "goal_events": [], "pending_question": None, "last_outcome": "startup"}
-        if self.path.exists():
+        if load_saved and self.path.exists():
             saved = json.loads(self.path.read_text())
             if saved.get("version") not in {1, 2}:
                 raise ValueError("Unsupported mission store version")
@@ -53,7 +53,7 @@ class MissionStore:
         self.revision = 0
         self.step_started = time.monotonic()
         self.segment = None
-        self.dirty = False
+        self.dirty = not load_saved
 
     @property
     def step(self):
