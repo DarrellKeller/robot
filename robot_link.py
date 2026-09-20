@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import logging
 import threading
 import time
 
@@ -68,6 +69,7 @@ class RobotLink:
         self.sequence = 0
         self.closed = threading.Event()
         self.error = None
+        self.write_retry_at = 0.0
         self.serial = None
         self.reader = None
         if not dry_run:
@@ -112,13 +114,25 @@ class RobotLink:
         if action not in ACTIONS:
             raise ValueError("Unknown motion")
         with self.write_lock:
+            if time.monotonic() < self.write_retry_at:
+                return "stop"
             # Recheck fresh sensor data at the point of dispatch.
             if action not in allowed_movements(self.snapshot()):
                 action = "stop"
             self.sequence += 1
             if self.serial:
                 lease = 250 if action == "backward" else LEASE_MS
-                self.serial.write(f"M,{self.sequence},{action},{lease}\n".encode())
+                try:
+                    self.serial.write(f"M,{self.sequence},{action},{lease}\n".encode())
+                except OSError as exc:
+                    # The firmware lease expires independently. Do not kill
+                    # microphone/vision for a transient USB write failure or
+                    # retry the old movement; the next decision gets fresh state.
+                    self.error = type(exc).__name__
+                    self.write_retry_at = time.monotonic() + 0.25
+                    logging.warning("Motor write failed (%s); lease will expire, fresh commands retry shortly", self.error)
+                    return "stop"
+                self.error = None
             return action
 
     def close(self):

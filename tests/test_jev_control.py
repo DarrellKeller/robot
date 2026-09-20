@@ -88,6 +88,18 @@ class Boundaries(unittest.TestCase):
         self.assertEqual(link.command('backward'), 'backward')
         self.assertIn(b',backward,250\n', link.serial.write.call_args.args[0])
 
+    def test_transient_write_failure_does_not_kill_controller(self):
+        link = RobotLink(dry_run=True)
+        link.serial = Mock()
+        link.latest, link.received_at = telemetry(), time.monotonic()
+        link.serial.write.side_effect = OSError('write timeout')
+        self.assertEqual(link.command('forward'), 'stop')
+        self.assertGreater(link.write_retry_at, time.monotonic())
+        link.serial.write.side_effect = None
+        link.write_retry_at = 0
+        self.assertEqual(link.command('stop'), 'stop')
+        self.assertIsNone(link.error)
+
     def test_no_movement_on_old_decisions_or_missing_visual_context(self):
         a = answers()
         state = dict(status='active', awaiting_user_answer=False, audio_state='wake_listening',
