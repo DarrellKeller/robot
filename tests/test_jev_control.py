@@ -97,7 +97,7 @@ class Boundaries(unittest.TestCase):
                         {'allowed_movements': ['stop']}):
             self.assertEqual(choose_movement(a, state | changes, 0.2), 'stop')
         a['movement']['confidence'] = 0.4
-        self.assertEqual(choose_movement(a, state, 0.2), 'stop')
+        self.assertEqual(choose_movement(a, state, 0.2), 'forward')
 
     def test_jev_schema_validation(self):
         a = answers()
@@ -329,6 +329,23 @@ class DecisionLifecycle(unittest.TestCase):
             self.assertIsNone(c.goal_request)
             self.assertEqual(c.speech_request, 'How are you?')
             c.audio.speak.assert_not_called()
+
+    def test_low_confidence_chat_choice_preserves_active_goal(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.bare_controller(d)
+            c.store.install('Find table', [{'kind': 'goal', 'instruction': 'Find table', 'completion': 'Found'}])
+            c.on_user('Did you get what I was saying?')
+            c.request_epoch = c.epoch
+            c.request_state['pending_transcript'] = c.pending_transcript
+            c.request_at = time.monotonic()
+            a = answers()
+            a['user_route'].update(choice='chat', confidence=0.63)
+            c.future = Future()
+            c.future.set_result({'answers': a, 'model': 'test'})
+            c.handle_decision(time.monotonic())
+            self.assertEqual(c.store.data['status'], 'active')
+            self.assertEqual(c.store.data['goal'], 'Find table')
+            self.assertEqual(c.speech_request, 'Did you get what I was saying?')
 
     def test_speech_generation_waits_for_jev_choice(self):
         with tempfile.TemporaryDirectory() as d:

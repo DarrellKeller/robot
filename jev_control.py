@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from audio_controller import AudioController
-from jev_client import JevClient
+from jev_client import JevClient, YES_THRESHOLD, GOAL_APPROVAL_THRESHOLD, COMPLETION_THRESHOLD
 from lfm_tools import Camera, LFMTools
 from mission_store import MissionStore, validate_plan
 from robot_link import RobotLink, allowed_movements, SENSOR_NAMES
@@ -21,9 +21,6 @@ from runtime_log import start_trace, record, close_trace
 
 ROOT = Path(__file__).resolve().parent
 DECISION_MAX_AGE = 0.45
-DECISION_CONFIDENCE = 0.75  # Initial settings; validate on recorded robot scenarios.
-SPEECH_DRAFT_CONFIDENCE = 0.4  # Reversible generation only; playback has a separate grounding gate.
-YES_THRESHOLD = 0.8
 VISION_MAX_AGE = 2.0
 
 
@@ -37,7 +34,7 @@ def drain(q):
 
 def choose_movement(answers, state, result_age):
     answer = answers["movement"]
-    if (result_age > DECISION_MAX_AGE or answer["confidence"] < DECISION_CONFIDENCE
+    if (result_age > DECISION_MAX_AGE
         or state["status"] != "active" or state["awaiting_user_answer"]
         or state["audio_state"] in {"listening", "transcribing"}
         or not state["vision"].get("fresh")):
@@ -155,7 +152,7 @@ class Controller:
                      hardware_context={
                          "tof_reliability": "ToF readings may be unreliable. All five sensors communicate through a mux; out_of_range is not proof of disconnected hardware or clear space. Assess usable readings against the current scene and recent measurements rather than assuming all readings are faulty.",
                          "unknown_directions": [name for name, value in zip(SENSOR_NAMES, sensors.get("tof_mm", [None] * 5)) if value is None],
-                         "navigation_guidance": "Use valid ranges as obstacle evidence and fresh camera observations to assess unknown directions. Prefer brief, observable movements and reassess. Ask the user if the route cannot be judged. Do not repeatedly wait solely because a ToF return is missing.",
+                         "navigation_guidance": "Use valid ranges as obstacle evidence and fresh camera observations to assess unknown directions. If the target is unseen or the camera faces a wall, use an allowed brief search pivot and reassess. Initially search left when neither side has an advantage. Forward travel requires a visually assessed route. Ask the user when no useful movement remains. Missing ToF alone is not a reason to wait.",
                          "heading_reliability": "Gyro heading is relative and drifts; short-term changes are more useful than absolute heading. Translation is not measured."
                      },
                      audio_state=self.audio.status(), tools=self.tools.status(),
@@ -344,11 +341,11 @@ class Controller:
         if self.pending_transcript:
             if self.request_state.get("pending_transcript") == self.pending_transcript:
                 route = answers["user_route"]
-                self.route_user(route["choice"] if route["confidence"] >= DECISION_CONFIDENCE else "clarify")
+                self.route_user(route["choice"])
             return
         if self.goal_proposal:
             if self.request_state.get("goal_proposal") == self.goal_proposal:
-                if answers["approve_goal"]["noul"] >= 0.9:
+                if answers["approve_goal"]["noul"] >= GOAL_APPROVAL_THRESHOLD:
                     goal, original = self.goal_proposal, self.goal_request
                     self.store.install(goal, [{"kind": "goal", "instruction": goal,
                         "completion": "All requested actions completed in order, with actual evidence."}])
@@ -368,7 +365,7 @@ class Controller:
                         self.store.outcome("goal", "rejected_by_jev")
             return
         activity = answers["activity"]
-        self.activity = activity["choice"] if activity["confidence"] >= DECISION_CONFIDENCE else "wait"
+        self.activity = activity["choice"]
         step = self.store.step
         action = choose_movement(answers, state, now - self.request_at)
         if not step or step["kind"] not in {"navigate", "dance", "goal"} or self.activity not in {"navigate", "dance"}:
@@ -402,7 +399,7 @@ class Controller:
                         self.speech_candidates = []
         elif not self.goal_request:
             speech = answers["lfm_speech_tool"]
-            if speech["choice"] != "none" and speech["confidence"] >= SPEECH_DRAFT_CONFIDENCE:
+            if speech["choice"] != "none":
                 self.request_speech(speech["choice"], state,
                     completes_step=bool(step and step["kind"] == "talk"))
         if state["status"] == "active":
@@ -413,7 +410,7 @@ class Controller:
                     self.store.data["pending_question"] = {"text": step["instruction"],
                                                           "step_index": self.store.data["step_index"]}
                     self.store.changed()
-            complete = answers["goal_complete"]["noul"] >= 0.9
+            complete = answers["goal_complete"]["noul"] >= COMPLETION_THRESHOLD
             if (step and complete and not self.speech_pending and
                 ((step["kind"] in {"navigate", "goal"} and state["vision"].get("fresh"))
                  or (step["kind"] == "dance" and self.dance_seconds >= 4))):

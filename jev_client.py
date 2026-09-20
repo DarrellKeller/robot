@@ -6,10 +6,17 @@ import requests
 
 from robot_schemas import JevDecisions
 
-MOVEMENTS = {"forward": "Advance along the visible clear route.",
-             "left": "Pivot left, including scanning or dancing when the current step calls for it.",
-             "right": "Pivot right, including scanning or dancing when the current step calls for it.",
-             "stop": "Keep motors stopped; use when waiting, uncertain, blocked, or no active step exists."}
+# Noul thresholds are absolute judgments, not Choice preference confidence.
+YES_THRESHOLD = 0.8
+GOAL_APPROVAL_THRESHOLD = 0.9
+COMPLETION_THRESHOLD = 0.9
+
+MOVEMENTS = {
+    "forward": "Advance toward a visible target or opening along a clear route permitted by allowed_movements.",
+    "left": "Default search direction when the target is unseen or a wall fills the view: briefly pivot left if allowed. Also turn toward a target on the left or perform a requested left dance pivot.",
+    "right": "Briefly pivot right toward a target on the right, when left is blocked, to continue an already productive rightward sweep, or for a requested right dance pivot.",
+    "stop": "Remain still for a concrete reason: explicit stop, inactive goal, active listening, stale vision, all useful movements blocked, or visible hazard making even a pivot unsuitable."
+}
 SPEECH_TOOLS = {
     "none": "Remain silent; no useful speech, already answered, or speech is pending.",
     "ask_person_about_situation": "Ask one useful question to clarify the task or recover from an obstacle.",
@@ -43,19 +50,28 @@ def questions():
         "activity": {"type": "choice", "instructions":
             "Choose the next activity needed for current_step and the shared goal, using dialogue, recent_route, "
             "recent_attempts and goal_events as evidence of what already happened. For compound goals preserve order. "
+            "Mauricio is energetic and curious. Prefer making progress or actively looking for the target. "
+            "An unseen target or unknown room layout calls for navigation/search, not passive waiting. "
             "Inactive mission means wait. A requested action is not evidence it happened.",
-            "criteria": {"wait": "Wait or stay stopped; inactive, blocked or uncertain.",
+            "criteria": {"wait": "Inactive mission, explicit waiting request, or no productive action currently available.",
                          "navigate": "Find or approach the goal using observed space and heading.",
                          "dance": "Perform the requested dance with short pivots.",
                          "talk": "Speak the next requested part of the goal.",
                          "listen": "Listen for a person's answer when required."}},
         "movement": {"type": "choice", "instructions":
-            "Choose immediate movement for the shared goal/current_step. Only use allowed_movements. "
-            "Use measured sensors, vision, recent_route and goal_events. "
-            "Null ToF returns mean unknown distance, not clear space. Use fresh vision to judge those directions; "
-            "stop when the intended path cannot be assessed. "
-            "Stop if inactive, screening input, awaiting an answer, or unsure. Avoid repeated failed routes. For dancing choose brief pivots; "
-            "for navigation choose a visible clear route toward the target. No map or translation odometry exists.",
+            "Choose Mauricio's next brief movement for current_step and the shared goal. "
+            "Mauricio is an energetic curious robot who makes progress rather than waiting by default. "
+            "Choose only from allowed_movements and use fresh vision, measured ranges and recent_route. "
+            "If the target is not visible, or the camera faces a wall, prefer an allowed left/right pivot to look elsewhere. "
+            "A wall ahead blocks forward travel toward it, not automatically an in-place pivot. "
+            "Continue a useful search sweep; avoid switching left/right repeatedly without gaining a new view. "
+            "When multiple pivots are reasonable, pick one rather than stop merely because there is no unique best direction. "
+            "Use left as the initial search direction when neither side has a specific advantage. "
+            "Missing ToF readings mean unknown range, not free space and not an automatic reason to wait. "
+            "Use the visible surroundings to assess a brief pivot; do not drive blindly into unseen space. "
+            "Stop for explicit user stop, inactive/screening mission, active listening, stale vision, "
+            "or a visible hazard/all useful movements blocked. Keep stop as a meaningful choice, not the default for an unseen goal. "
+            "For dancing use short pivots. No translation odometry or map exists.",
             "criteria": MOVEMENTS},
         "need_fresh_vision": {"type": "noul", "instructions":
             "Would a fresh three-sentence scene observation help the goal or an unanswered conversation? "

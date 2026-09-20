@@ -41,6 +41,15 @@ Recovery adds no questions: recent attempts, interruption reasons, repeated
 failures and a step-overdue event become input to these same questions. Firmware
 sensor/clearance stops never depend on a model's answer.
 
+Choice answers select among actions; their confidence is logged but is not a
+blanket permission-to-act threshold. Noul approval thresholds live in
+`jev_client.py`: 0.8 for speech grounding and other yes/no gates, and 0.9 for
+goal approval and completion. Movement still requires an active mission, fresh
+vision and decision, no pending answer or active listening, and live hardware
+clearance. An unseen target favors a brief search pivot (initially left when
+neither side has an advantage); forward travel requires a visually assessed
+route. Stop remains available for concrete reasons to remain still.
+
 ## Setup
 
 Install Python requirements in the project's environment:
