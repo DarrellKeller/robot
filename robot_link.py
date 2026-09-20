@@ -11,6 +11,7 @@ import time
 ACTIONS = {"stop", "forward", "backward", "left", "right"}
 SENSOR_NAMES = ("L90", "L45", "F", "R45", "R90")
 TELEMETRY_MAX_AGE = 0.25
+CLEARANCE_MM = 300
 LEASE_MS = 600
 
 
@@ -43,8 +44,17 @@ def allowed_movements(snapshot):
     if (not snapshot or snapshot.get("age_s", float("inf")) > TELEMETRY_MAX_AGE
         or not snapshot.get("imu_valid") or snapshot.get("imu_age_ms", 1000) >= 100):
         return ["stop"]
-    # ToF is evidence for Jev, not a local distance veto.
-    return ["stop", "forward", "left", "right", "backward"]
+    ranges = snapshot["tof_mm"]
+    allowed = ["stop"]
+    if not any(v is not None and v < CLEARANCE_MM for v in ranges[1:4]):
+        allowed.append("forward")
+    # A pivot sweeps the chassis; retreat first when an obstacle is close.
+    if not any(v is not None and v < CLEARANCE_MM for v in ranges):
+        allowed.extend(("left", "right"))
+    # Front/side obstacles must not veto escape in the opposite direction.
+    # No rear sensor exists; reverse retains its short 250 ms lease.
+    allowed.append("backward")
+    return allowed
 
 
 class RobotLink:

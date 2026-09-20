@@ -61,6 +61,7 @@ bool rangeValid[5] = {};
 const char* rangeStatus[5] = {"init_failed", "init_failed", "init_failed", "init_failed", "init_failed"};
 const unsigned long SENSOR_MAX_AGE_MS = 250;
 const unsigned long MAX_LEASE_MS = 650;
+const int CLEARANCE_MM = 300;
 const int DRIVE_PWM = 180; // Match main's default forward/reverse baseSpeed.
 const int TURN_PWM = 100;
 unsigned long leaseUntil = 0;
@@ -71,6 +72,7 @@ const char* stopReason = "startup";
 char commandBuffer[80];
 size_t commandLength = 0;
 bool discardCommand = false;
+bool wheelTest = false;
 
 bool initializeIMU();
 void calibrateGyro(int samples = 1000);
@@ -84,6 +86,7 @@ void stopMotors() {
 }
 
 void halt(const char* reason) {
+  wheelTest = false;
   stopMotors(); motion = "stop"; stopReason = reason;
 }
 
@@ -99,9 +102,14 @@ bool freshIMU() {
 
 bool clearFor(const char* action) {
   if (!strcmp(action, "stop")) return true;
-  // Jev decides obstacle avoidance from the full ToF telemetry.
-  // Firmware retains fresh control telemetry, emergency stop and lease expiry.
-  return freshIMU();
+  if (!freshIMU()) return false;
+  if (wheelTest || !strcmp(action, "backward")) return true;
+  for (int i = 0; i < 5; ++i) {
+    if (!rangeValid[i] || millis() - rangeAt[i] > SENSOR_MAX_AGE_MS) continue;
+    if (!strcmp(action, "forward") && (i == 0 || i == 4)) continue;
+    if (rangeMM[i] < CLEARANCE_MM) return false;
+  }
+  return true;
 }
 
 void applyMotion() {
@@ -126,10 +134,12 @@ void acceptCommand(char* line) {
     halt("test_start");
     if (!ttl || ttl > 6000) { halt("bad_test_duration"); return; }
     if (!freshIMU()) { halt("imu_unavailable"); return; }
+    wheelTest = true;
     motion = "forward"; stopReason = "wheel_test"; leaseUntil = millis() + ttl;
     applyMotion();
     return;
   }
+  wheelTest = false;
   if (sscanf(line, "M,%lu,%11[^,],%lu%c", &id, action, &ttl, &extra) != 3) {
     halt("bad_command"); return;
   }

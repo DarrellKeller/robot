@@ -63,9 +63,15 @@ class Boundaries(unittest.TestCase):
         for data in ({}, telemetry(age_s=0.3), telemetry(imu_valid=False), telemetry(imu_age_ms=101)):
             self.assertEqual(allowed_movements(data), ["stop"])
 
-    def test_tof_is_model_evidence_not_a_local_motion_veto(self):
-        for ranges in ([900, None, 900, 900, 900], [None] * 5, [37, 30, 20, 30, 37]):
+    def test_missing_ranges_do_not_veto_motion(self):
+        for ranges in ([900, None, 900, 900, 900], [None] * 5):
             self.assertEqual(allowed_movements(telemetry(tof_mm=ranges)), ['stop', 'forward', 'left', 'right', 'backward'])
+
+    def test_obstacle_stops_approach_but_always_allows_retreat(self):
+        for ranges in ([37, 30, 20, 30, 37], [223, 37, 355, None, None], [None, None, 299, None, None]):
+            self.assertEqual(allowed_movements(telemetry(tof_mm=ranges)), ['stop', 'backward'])
+        self.assertEqual(allowed_movements(telemetry(tof_mm=[100, 900, 900, 900, 900])),
+                         ['stop', 'forward', 'backward'])
 
     def test_reject_legacy_and_malformed_packets(self):
         for packet in ('1,2,3,4,5', '{}', '[]', json.dumps(telemetry(heading_deg=float('nan'))),
@@ -79,7 +85,7 @@ class Boundaries(unittest.TestCase):
         link.latest, link.received_at = telemetry(), time.monotonic()
         self.assertEqual(link.command('forward'), 'forward')
         link.latest['tof_mm'][2] = 100
-        self.assertEqual(link.command('forward'), 'forward')
+        self.assertEqual(link.command('forward'), 'stop')
         self.assertEqual(link.command('backward'), 'backward')
         self.assertIn(b',backward,250\n', link.serial.write.call_args.args[0])
         link.received_at -= 1

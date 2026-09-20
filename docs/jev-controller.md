@@ -269,8 +269,11 @@ Initial settings are deliberately explicit and need chassis testing:
   Startup sensor timeout matches main at 200 ms; runtime polls remain bounded
   at 30 ms per phase. MPU is polled during turns too.
 - Motion requires fresh telemetry and a fresh calibrated MPU. ToF readings are
-  supplied to Jev as evidence; neither Python nor firmware removes movement
-  choices based on a distance threshold. Jev chooses when to stop or retreat.
+  supplied to Jev as evidence. Python and firmware block forward below 300 mm
+  on a front-facing sensor, and block pivots below 300 mm on any sensor.
+  Reverse remains available regardless of front/side ranges, with its 250 ms
+  lease, so the obstacle stop cannot also veto retreat. Missing ranges remain
+  unknown rather than automatically blocking movement.
   Command expiry and emergency stop remain enforced locally. Forward/reverse
   PWM is 180, matching main's default; pivot PWM is 100.
 - Choice confidence is logged, not used as a blanket veto. Noul thresholds
@@ -313,7 +316,8 @@ References: [TypeSafe architecture](https://docs.typesafe.ai/concepts/how-to-bui
 [Jev limitations](https://docs.typesafe.ai/model-jaggedness/jev-1.13),
 [Pololu VL53L0X library](https://github.com/pololu/vl53l0x-arduino).
 
-Backward movement uses a 250 ms renewable lease; Jev evaluates clearance.
+Backward movement uses a 250 ms renewable lease; front/side obstacle checks
+do not block it. Jev evaluates when to retreat and reassess.
 The robot has no rear range sensor; Jev is instructed to retreat briefly over
 recently traversed space and reassess. Front obstacles do not prevent retreat.
 Whisper metadata is normalized before validation; transcription failures are
@@ -321,7 +325,8 @@ logged and the listener continues instead of silently terminating.
 
 For a manually supervised test with wheels held off the ground,
 `WHEEL_TEST,6000` runs both wheels forward at DRIVE_PWM for up to 6000 ms,
-without model decisions. The firmware lease stops it automatically;
+without model decisions and with ToF checks bypassed only for that test.
+The firmware lease stops it automatically;
 `x` stops it immediately. This
 command is not exposed to Jev or the normal Python movement API.
 
