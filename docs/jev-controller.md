@@ -217,8 +217,11 @@ Initial settings are deliberately explicit and need chassis testing:
   Each library polling phase has a 30 ms timeout (two phases per measurement).
   Telemetry is emitted at the first loop opportunity after 50 ms, in every mode.
   Invalid/stale ranges are `null`, never “clear.” MPU is polled during turns too.
-- Motion requires five healthy ToF readings and a fresh calibrated MPU. Forward
-  checks the three forward-facing ranges; pivots check all five, at 300 mm.
+- Motion requires fresh telemetry and a fresh calibrated MPU. Missing ToF returns
+  no longer veto movement: they remain unknown, and Jev must assess the route from
+  fresh vision. Detected obstacles still stop motion at 300 mm: forward checks the
+  three forward-facing sensors; pivots check valid returns from all five.
+  This cannot guarantee obstacle detection in directions with missing readings.
   Reverse is not exposed because rear coverage is absent. PWM defaults to 100.
 - Confidence settings (0.75 choices, 0.8 Nouls, 0.9 completion) are initial
   policy settings, not empirically established reliability guarantees.

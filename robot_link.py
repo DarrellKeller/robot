@@ -44,12 +44,12 @@ def allowed_movements(snapshot):
         or not snapshot.get("imu_valid") or snapshot.get("imu_age_ms", 1000) >= 100):
         return ["stop"]
     ranges = snapshot["tof_mm"]
-    if any(v is None for v in ranges):
-        return ["stop"]
     allowed = ["stop"]
-    if min(ranges[1:4]) >= CLEARANCE_MM:
+    # Missing returns are unknown, not a blanket motor veto. Jev also sees
+    # the missing directions and current vision before choosing any movement.
+    if not any(v is not None and v < CLEARANCE_MM for v in ranges[1:4]):
         allowed.append("forward")
-    if min(ranges) >= CLEARANCE_MM:
+    if not any(v is not None and v < CLEARANCE_MM for v in ranges):
         allowed.extend(("left", "right"))
     return allowed
 

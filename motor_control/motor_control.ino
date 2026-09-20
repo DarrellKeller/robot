@@ -100,9 +100,10 @@ bool freshIMU() {
 bool clearFor(const char* action) {
   if (!strcmp(action, "stop")) return true;
   if (!freshIMU()) return false;
-  // All five must be healthy. Turns sweep the chassis, so check every direction.
+  // Missing returns are unknown. Only fresh, detected obstacles veto motion.
+  // Turns sweep the chassis, so check valid returns in every direction.
   for (int i = 0; i < 5; ++i) {
-    if (!rangeValid[i] || millis() - rangeAt[i] > SENSOR_MAX_AGE_MS) return false;
+    if (!rangeValid[i] || millis() - rangeAt[i] > SENSOR_MAX_AGE_MS) continue;
     if ((strcmp(action, "forward") || (i >= 1 && i <= 3)) && rangeMM[i] < CLEARANCE_MM)
       return false;
   }

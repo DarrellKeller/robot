@@ -59,12 +59,17 @@ class WakeAcknowledgement(unittest.TestCase):
 
 
 class Boundaries(unittest.TestCase):
-    def test_bad_or_missing_sensors_cannot_move(self):
-        for data in ({}, telemetry(age_s=0.3), telemetry(imu_valid=False), telemetry(imu_age_ms=101),
-                     telemetry(tof_mm=[900, None, 900, 900, 900])):
+    def test_stale_connection_or_imu_cannot_move(self):
+        for data in ({}, telemetry(age_s=0.3), telemetry(imu_valid=False), telemetry(imu_age_ms=101)):
             self.assertEqual(allowed_movements(data), ["stop"])
         self.assertEqual(allowed_movements(telemetry(tof_mm=[100, 900, 900, 900, 900])), ["stop", "forward"])
         self.assertEqual(allowed_movements(telemetry(tof_mm=[900, 900, 100, 900, 900])), ["stop"])
+
+    def test_missing_tof_does_not_veto_motion_but_detected_obstacles_do(self):
+        for ranges in ([900, None, 900, 900, 900], [None] * 5):
+            self.assertEqual(allowed_movements(telemetry(tof_mm=ranges)), ['stop', 'forward', 'left', 'right'])
+        self.assertEqual(allowed_movements(telemetry(tof_mm=[None, None, 100, None, None])), ['stop'])
+        self.assertEqual(allowed_movements(telemetry(tof_mm=[100, None, None, None, None])), ['stop', 'forward'])
 
     def test_reject_legacy_and_malformed_packets(self):
         for packet in ('1,2,3,4,5', '{}', '[]', json.dumps(telemetry(heading_deg=float('nan'))),

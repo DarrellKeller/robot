@@ -51,8 +51,10 @@ def questions():
                          "listen": "Listen for a person's answer when required."}},
         "movement": {"type": "choice", "instructions":
             "Choose immediate movement for the shared goal/current_step. Only use allowed_movements. "
-            "Use measured sensors, vision, recent_route and goal_events. Stop if inactive, screening input, "
-            "awaiting an answer, or unsure. Avoid repeated failed routes. For dancing choose brief pivots; "
+            "Use measured sensors, vision, recent_route and goal_events. "
+            "Null ToF returns mean unknown distance, not clear space. Use fresh vision to judge those directions; "
+            "stop when the intended path cannot be assessed. "
+            "Stop if inactive, screening input, awaiting an answer, or unsure. Avoid repeated failed routes. For dancing choose brief pivots; "
             "for navigation choose a visible clear route toward the target. No map or translation odometry exists.",
             "criteria": MOVEMENTS},
         "need_fresh_vision": {"type": "noul", "instructions":
