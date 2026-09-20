@@ -98,6 +98,20 @@ class RecoveryReplay(unittest.TestCase):
             self.r.update(telemetry(tof_mm=[450] * 5), {}, self.now + i, enabled=False)
         self.assertEqual(self.r.phase, 'retreat')
 
+    def test_accepted_steering_resumes_a_mission_paused_for_clarification(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = Controller.__new__(Controller)
+            c.store = MissionStore(Path(d) / 'state.json')
+            c.store.install('Find an objective', [{'kind': 'goal', 'instruction': 'Find an objective', 'completion': 'Found'}])
+            c.store.data['status'] = 'screening'
+            c.prior_status, c.epoch = 'paused', 6
+            c.pending_transcript = {'text': 'Go right that way'}
+            c.goal_request = None
+            c.route_user('steer')
+            self.assertEqual(c.store.data['status'], 'active')
+            self.assertEqual(c.store.data['steering_advice'], 'Go right that way')
+            self.assertEqual(c.store.data['goal'], 'Find an objective')
+
     def test_steering_preserves_task_and_new_goal_resets_recovery(self):
         with tempfile.TemporaryDirectory() as d:
             c = Controller.__new__(Controller)

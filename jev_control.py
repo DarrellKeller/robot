@@ -209,7 +209,7 @@ class Controller:
         elif route == "resume":
             self.store.data.update(status="active" if self.store.step else "idle", pending_question=None)
         elif route == "steer" and self.store.step:
-            self.store.data.update(steering_advice=text, pending_question=None)
+            self.store.data.update(status="active", steering_advice=text, pending_question=None)
             self.store.goal_event("steering_advice", text)
             self.speech_request = text
         elif route == "goal" or route == "steer":
