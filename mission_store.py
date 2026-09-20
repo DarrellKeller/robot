@@ -70,7 +70,7 @@ class MissionStore:
         self.changed()
 
     def install(self, goal, plan):
-        self.data.update(goal=goal[:1000], steps=plan, step_index=0, status="active",
+        self.data.update(goal=goal[:1000], goal_user_request=goal[:1000], steps=plan, step_index=0, status="active",
                          recent_attempts=[], goal_events=[], pending_question=None, last_outcome="goal_started")
         self.step_started = time.monotonic()
         self.changed()

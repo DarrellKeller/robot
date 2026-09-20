@@ -42,7 +42,8 @@ def language_context(state):
     return {key: state.get(key) for key in
             ("goal", "goal_user_request", "current_step", "status", "vision", "memory", "recent_route",
              "recent_attempts", "goal_events", "pending_question", "speech_request")} | {
-             "dialogue": state.get("dialogue", [])[-12:],
+             "dialogue": [{"role": m["role"], "content": m["text"]}
+                          for m in state.get("dialogue", [])[-12:]],
              "sensors": {k: state.get("sensors", {}).get(k) for k in
                          ("tof_cm", "motion", "heading_deg", "rotation", "imu_valid")}}
 
@@ -139,8 +140,11 @@ class LFMTools:
         def infer(prompt, limit, temperature=0.0, images=None):
             formatted = apply_chat_template(processor, config, prompt, num_images=1 if images else 0)
             kwargs = {"image": images} if images else {}
-            output = generate(model, processor, formatted, max_tokens=limit,
-                              temperature=temperature, verbose=False, **kwargs)
+            # Yield the local inference engine between candidate replies so a
+            # queued microphone transcription need not wait for the whole batch.
+            with LOCAL_INFERENCE_LOCK:
+                output = generate(model, processor, formatted, max_tokens=limit,
+                                  temperature=temperature, verbose=False, **kwargs)
             text = output.text.strip()
             record("lfm_generation", kind=job.kind, tool=job.tool, revision=job.revision,
                    prompt=prompt, temperature=temperature, max_tokens=limit, output=text,
@@ -195,7 +199,13 @@ class LFMTools:
                            "status_update": "Say the requested announcement or give a useful task update.",
                            "celebrate": "Briefly celebrate the recorded completion."}.get(job.tool, "Reply to the accepted request.")
                 prompt.append({"role": "user", "content": purpose})
-            candidates.append(infer(prompt, 80, temperature=0.8).strip('"'))
+            try:
+                candidate = infer(prompt, 80, temperature=0.8).strip('"').strip()
+                if candidate:
+                    candidates.append(candidate)
+            except ValueError:
+                # One empty generation must not discard usable alternatives.
+                continue
         return SpeechCandidates(candidates=candidates).candidates
 
     def _run(self):
@@ -219,10 +229,10 @@ class LFMTools:
             result = {"kind": job.kind, "tool": job.tool, "revision": job.revision,
                       "captured_at": job.captured_at, "heading_deg": job.heading}
             try:
-                with LOCAL_INFERENCE_LOCK:
-                    result["value"] = self._generate(job, model, processor, config)
+                result["value"] = self._generate(job, model, processor, config)
             except Exception as exc:
                 result["error"] = type(exc).__name__
+                result["message"] = str(exc)
             # Publish before dropping pending so the controller cannot duplicate this job.
             self.results.put(result)
             with self.lock:

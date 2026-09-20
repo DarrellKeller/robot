@@ -37,6 +37,7 @@ def choose_movement(answers, state, result_age):
     if (result_age > DECISION_MAX_AGE
         or state["status"] != "active" or state["awaiting_user_answer"]
         or state["audio_state"] in {"listening", "transcribing"}
+        or state.get("acknowledgment_pending", False)
         or not state["vision"].get("fresh")):
         return "stop"
     action = answer["choice"]
@@ -109,6 +110,7 @@ class Controller:
             self.on_user(args.goal)
 
     def invalidate(self):
+        self.acknowledgment_until = 0
         self.epoch += 1
         self.audio.invalidate(self.epoch)
         self.last_decision_at = 0
@@ -160,6 +162,7 @@ class Controller:
                      pending_transcript=self.pending_transcript, goal_request=self.goal_request,
                      goal_proposal=self.goal_proposal, speech_candidates=self.speech_candidates,
                      speech_purpose=self.speech_purpose, speech_request=self.speech_request)
+        state["acknowledgment_pending"] = now < getattr(self, "acknowledgment_until", 0)
         return state
 
     def on_user(self, text, quality=None):
@@ -258,6 +261,7 @@ class Controller:
                     # Jev still reviews the verbatim request before installation.
                     self.goal_proposal = self.goal_request
                 if kind == "speech":
+                    self.acknowledgment_until = 0
                     self.speech_pending = False
                     self.last_speech_at = time.monotonic()
                 continue
@@ -288,6 +292,7 @@ class Controller:
                 if event["revision"] != self.epoch:
                     continue
                 self.speech_pending = False
+                self.acknowledgment_until = 0
                 self.last_speech_at = time.monotonic()
                 if kind == "speech_failed":
                     self.store.outcome("speech", "playback_failed")
@@ -348,17 +353,13 @@ class Controller:
                     goal, original = self.goal_proposal, self.goal_request
                     steps = [{"kind": "goal", "instruction": goal,
                         "completion": "All requested actions completed in order, with actual evidence."}]
-                    if self.audio.enabled:
-                        steps.insert(0, {"kind": "talk", "instruction":
-                            "Briefly acknowledge the accepted task in Mauricio's cheeky voice. "
-                            "Say what you are about to do, without claiming it is done or adding a new task.",
-                            "completion": "The Jev-approved acknowledgment has actually been spoken."})
                     self.store.install(goal, steps)
                     self.store.data["goal_user_request"] = original
                     self.dance_seconds, self.dance_recorded = 0, False
                     self.invalidate()
-                    if self.store.step["kind"] == "talk":
-                        self.speech_request = self.store.step["instruction"]
+                    if self.audio.enabled:
+                        self.speech_request = "Briefly acknowledge the accepted task in Mauricio's cheeky voice. Say what you will do next without claiming completion."
+                        self.acknowledgment_until = now + 4
                     logging.info("GOAL approved by Jev: %s", goal)
                     record("goal_approved", goal=goal, original_request=original)
                 else:
@@ -391,7 +392,9 @@ class Controller:
             selection = answers["speech_choice"]
             if selection["choice"] != "wait":
                 choice = selection["choice"]
-                if choice == "reject" or answers[f"speech_{choice}_ok"]["noul"] < YES_THRESHOLD:
+                if (choice == "reject" or int(choice) > len(self.speech_candidates)
+                    or answers[f"speech_{choice}_ok"]["noul"] < YES_THRESHOLD):
+                    self.acknowledgment_until = 0
                     self.speech_candidates = []
                     self.speech_pending = False
                     self.last_speech_at = now

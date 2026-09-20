@@ -94,7 +94,7 @@ class Boundaries(unittest.TestCase):
         self.assertEqual(choose_movement(a, state, 0.6), 'stop')
         for changes in ({'status': 'paused'}, {'awaiting_user_answer': True},
                         {'audio_state': 'listening'}, {'vision': {'fresh': False}},
-                        {'allowed_movements': ['stop']}):
+                        {'allowed_movements': ['stop']}, {'acknowledgment_pending': True}):
             self.assertEqual(choose_movement(a, state | changes, 0.2), 'stop')
         a['movement']['confidence'] = 0.4
         self.assertEqual(choose_movement(a, state, 0.2), 'forward')
@@ -133,6 +133,13 @@ class Persistence(unittest.TestCase):
             reloaded = MissionStore(path)
             self.assertEqual(reloaded.data['status'], 'paused')
             self.assertEqual(reloaded.step['instruction'], 'Find table')
+
+    def test_new_plan_replaces_old_goal_request_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MissionStore(Path(directory) / 'mission.json')
+            store.data['goal_user_request'] = 'Deliver the old snack'
+            store.install('Look for an objective', [{'kind': 'talk', 'instruction': 'Introduce yourself', 'completion': 'Spoken'}])
+            self.assertEqual(store.context()['goal_user_request'], 'Look for an objective')
 
     def test_plan_validation(self):
         with self.assertRaises(ValueError):
@@ -305,33 +312,17 @@ class DecisionLifecycle(unittest.TestCase):
             c.future.set_result({'answers':a, 'model':'test'})
             c.handle_decision(time.monotonic())
             self.assertEqual(c.store.data['goal'], 'Dance for the user')
-            self.assertEqual(c.store.step['kind'], 'talk')
+            self.assertEqual(c.store.step['kind'], 'goal')
             self.assertTrue(c.speech_request)
+            self.assertGreater(c.acknowledgment_until, time.monotonic())
+            self.assertLessEqual(c.acknowledgment_until, time.monotonic() + 4)
             self.assertEqual(c.store.data['goal_user_request'], 'Dance for me')
             c.link.command.assert_called_with('stop')
-            # Independent Jev choices cannot bypass the acknowledgment step.
-            a['activity']['choice'] = 'dance'
-            a['movement']['choice'] = 'left'
-            a['goal_complete']['noul'] = 0.99
-            c.request_epoch = c.epoch
-            c.context.return_value = c.store.context() | dict(sensors=telemetry(),
-                vision={'fresh': True}, audio_state='idle', allowed_movements=['left', 'stop'])
-            c.future = Future()
-            c.future.set_result({'answers': a, 'model': 'test'})
-            c.handle_decision(time.monotonic())
-            c.link.command.assert_called_with('stop')
-            self.assertEqual(c.store.step['kind'], 'talk')
-            # Generation/approval alone must not advance into movement.
-            c.speech_completes_step = True
             c.audio.events = __import__('queue').Queue()
             c.audio.events.put({'kind': 'speech_failed', 'revision': c.epoch})
             c.handle_audio()
-            self.assertEqual(c.store.step['kind'], 'talk')
-            c.audio.events.put({'kind': 'spoken', 'revision': c.epoch,
-                                'text': 'Watch these wheels I am about to dance', 'ask': False})
-            c.handle_audio()
+            self.assertEqual(c.acknowledgment_until, 0)
             self.assertEqual(c.store.step['kind'], 'goal')
-            self.assertEqual(c.store.data['goal_events'][-1]['kind'], 'spoken')
 
     def test_goal_without_audio_does_not_wait_for_acknowledgment(self):
         with tempfile.TemporaryDirectory() as d:
@@ -428,6 +419,20 @@ class DecisionLifecycle(unittest.TestCase):
             c.handle_decision(time.monotonic())
             c.audio.speak.assert_not_called()
             self.assertEqual(c.speech_candidates, [])
+
+    def test_missing_candidate_cannot_be_played_from_partial_batch(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.bare_controller(d)
+            c.request_epoch = c.epoch
+            c.speech_candidates = ['One valid reply']
+            c.request_state['speech_candidates'] = list(c.speech_candidates)
+            a = answers()
+            a['speech_choice']['choice'] = '3'
+            a['speech_3_ok']['noul'] = 0.99
+            c.future = Future()
+            c.future.set_result({'answers': a, 'model': 'test'})
+            c.handle_decision(time.monotonic())
+            c.audio.speak.assert_not_called()
 
     def test_emergency_stop_does_not_wait_for_jev(self):
         with tempfile.TemporaryDirectory() as d:

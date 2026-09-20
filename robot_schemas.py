@@ -17,7 +17,7 @@ class GoalDraft(Contract):
 
 
 class SpeechCandidates(Contract):
-    candidates: Annotated[list[Reply], Field(min_length=3, max_length=3)]
+    candidates: Annotated[list[Reply], Field(min_length=1, max_length=3)]
 
 
 class SceneDescription(Contract):

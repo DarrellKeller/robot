@@ -5,12 +5,15 @@ subgoals and recent outcomes. Python owns execution and persistence. The ESP32
 owns motor output, continuous sensor acquisition, clearance checks and a command
 watchdog. LFM2.5-VL-450M supplies scene descriptions, candidate replies and short goal drafts.
 Jev screens user input, approves goals, and selects every generated reply before playback.
-With audio enabled, a newly approved user task starts with an existing `talk`
-step: a brief cheeky acknowledgment, then the task itself. Only successful
-playback advances that step; failed playback or rejected candidates cannot
-start motion. The spoken reply becomes shared event history for Jev's next
-decision, while the accepted user request remains the goal. Without audio,
-the task starts directly.
+With audio enabled, a newly approved task requests a brief cheeky acknowledgment.
+Movement waits at most four seconds for it, released earlier on playback or
+speech failure/rejection. Speech cannot indefinitely block an otherwise valid
+action. Explicit `talk` steps still require actual playback to complete.
+Spoken replies become shared event history; the accepted request remains the goal.
+Without audio, the task starts directly. LFM drafts up to three replies; a failed
+candidate does not discard the usable ones, and Jev can only play an existing,
+independently approved candidate. Local inference yields between candidates to
+allow microphone transcription.
 
 ## Architecture
 

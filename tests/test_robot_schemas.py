@@ -7,8 +7,8 @@ from jev_client import questions
 
 
 class Contracts(unittest.TestCase):
-    def test_exactly_three_nonempty_replies(self):
-        for candidates in ([], ['one'], ['one', 'two', ''], ['a', 'b', 'c', 'd']):
+    def test_one_to_three_nonempty_replies(self):
+        for candidates in ([], ['one', 'two', ''], ['a', 'b', 'c', 'd']):
             with self.assertRaises(ValidationError):
                 SpeechCandidates(candidates=candidates)
         self.assertEqual(SpeechCandidates(candidates=[' one ', 'two', 'three']).candidates[0], 'one')
@@ -30,6 +30,7 @@ class Contracts(unittest.TestCase):
                                     'dialogue':[{'role':'user','text':'hello'}], 'goal':'Find table'})
         self.assertNotIn('garbage', str(context))
         self.assertEqual(context['goal'], 'Find table')
+        self.assertEqual(context['dialogue'], [{'role': 'user', 'content': 'hello'}])
 
     def test_questions_match_typed_decisions(self):
         self.assertEqual(set(questions()), set(JevDecisions.model_fields))

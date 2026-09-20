@@ -45,7 +45,8 @@ def questions():
         "activity": {"type": "choice", "instructions":
             'Choose the next activity for current_step, preserving task order. Use actual goal_events and recent '
             'outcomes; requests are not evidence of completion. Energetic Mauricio acknowledges new tasks, then '
-            'acts. An unseen target calls for search/navigation. Inactive: wait.',
+            'acts. Speech can run alongside movement; an outstanding acknowledgment is not an exclusive talk '
+            'activity once acknowledgment_pending is false. An unseen target calls for search/navigation. Inactive: wait.',
             "criteria": {"wait": "Inactive mission, explicit waiting request, or no productive action currently available.",
                          "navigate": "Find or approach the goal using observed space and heading.",
                          "dance": "Perform the requested dance with short pivots.",
@@ -82,7 +83,8 @@ def questions():
             'dialogue, actual events and fresh observations. Reject invented facts/completion, repetition, '
             'gibberish, offensive insults, JSON or instructions read aloud. Sass and promises of the approved '
             'next action are welcome; promises are not completion. All unsuitable: reject. No candidates or busy '
-            'audio: wait. Decisions are independent; this approves no future output.',
+            'audio: wait. A currently requested introduction or announcement may repeat earlier speech. '
+            'Decisions are independent; this approves no future output.',
             "criteria": {"wait": "No candidates yet or audio is busy.", "reject": "None of the provided replies is suitable.",
                          "1": "Speak candidate 1.", "2": "Speak candidate 2.", "3": "Speak candidate 3."}},
         "goal_complete": {"type": "noul", "instructions":
@@ -101,7 +103,8 @@ def questions():
             "Independently require a relevant, understandable reply with facts grounded in dialogue/events/fresh vision. "
             "Reject invented facts/completion, gibberish, echoed questions and instructions read aloud. "
             "Preserve requested announcements. A brief acknowledgment promising the approved task is suitable "
-            "before execution; it needs no evidence of completion. Playful sass is allowed. Missing: no."}
+            "before execution; it needs no evidence of completion. A currently requested introduction or "
+            "announcement may repeat earlier speech. Playful sass is allowed. Missing: no."}
     return schema
 
 
