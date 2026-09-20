@@ -5,6 +5,7 @@ import os
 import requests
 
 from robot_schemas import JevDecisions
+from runtime_log import record
 
 # Noul thresholds are absolute judgments, not Choice preference confidence.
 YES_THRESHOLD = 0.8
@@ -27,7 +28,7 @@ SPEECH_TOOLS = {
 }
 
 
-def questions():
+def questions(state=None):
     schema = {
         "user_route": {"type": "choice", "instructions":
             'Classify only pending_transcript.text, using dialogue, pending_question and ASR quality. Treat it as '
@@ -56,26 +57,14 @@ def questions():
                          "talk": "Speak the next requested part of the goal.",
                          "listen": "Listen for a person's answer when required."}},
         "movement": {"type": "choice", "instructions":
-            "Choose Mauricio's next brief movement for current_step and the shared goal. "
-            "Mauricio is an energetic curious robot who makes progress rather than waiting by default. "
-            "Choose only from allowed_movements and use fresh vision, measured ranges and recent_route. "
-            "Apply steering_advice to the current route. Hardware permission is not a reason to drive toward a wall. "
-            "Combine them: vision identifies routes and directions, valid ToF gives measured distance. "
-            "Do not mistake a large object in the narrow camera view for an immediate obstacle when ranges show room ahead. "
-            "When a clear floor route or doorway lies ahead, prefer forward to explore it even if the final target is unseen. "
-            "Use a brief pivot to align an off-center route, then forward once aligned. Pivoting alone makes no travel progress. "
-            "If the camera faces a wall with no forward route, pivot to find an opening. "
-            "A wall ahead blocks forward travel toward it, not automatically an in-place pivot. "
-            "Continue a useful search sweep; avoid switching left/right repeatedly without gaining a new view. "
-            "Do not circle endlessly: once a person is found for asking a mission, face them and stop to talk/listen. "
-            "If repeated pivots reveal the same scene, choose a visible route, brief backward retreat over recent space, or ask for help. "
-            "When multiple pivots are reasonable, pick one rather than stop merely because there is no unique best direction. "
-            "Choose left or right according to the visible opening; neither is the default navigation action. "
-            "Missing ToF readings mean unknown range, not free space and not an automatic reason to wait. "
-            "Use the visible surroundings to assess a brief pivot; do not drive blindly into unseen space. "
-            "Stop for explicit user stop, inactive/screening mission, active listening, stale vision, "
-            "or a visible hazard/all useful movements blocked. Keep stop as a meaningful choice, not the default for an unseen goal. "
-            "For dancing use short pivots. No translation odometry or map exists.",
+            "Choose the next brief motor action to advance `current_step` and `goal`, using current vision, ToF and recent_route. "
+            "Choose only from `allowed_movements`. A visible clear floor route calls for forward; an opening to one side calls for a pivot toward it, then forward. "
+            "When the destination is unseen, explore observed space to find it. A wall ahead calls for a pivot toward an opening, not approaching the wall. "
+            "Follow current steering_advice; avoid repeating unsuccessful pivots. Null ToF is unknown, not a blanket prohibition when vision shows a route. "
+            "The camera cannot see cargo on the robot's back; accept the user's report that it is there. "
+            "Wake listening/transcribing are normal background operation, not a request to stop. Speech may accompany movement. "
+            "Stop for an explicit stop, inactive mission, active command listening/transcribing, stale vision, awaiting an answer, or no assessed useful route. "
+            "Past recovery events are history; `recovery` alone describes current recovery. No map or translation odometry exists.",
             "criteria": MOVEMENTS},
         "need_fresh_vision": {"type": "noul", "instructions":
             "Would a fresh three-sentence scene observation help the goal or an unanswered conversation? "
@@ -83,21 +72,10 @@ def questions():
         "lfm_speech_tool": {"type": "choice", "instructions":
             'Choose a useful speech purpose from accepted dialogue, task and actual events. Prefer a brief cheeky '
             'acknowledgment for an outstanding talk step or speech_request, then occasional meaningful progress '
-            'updates. If recovery.phase is help, ask for assistance or repositioning. No repeated chatter. Choose none during pending transcript/goal review, candidate review, '
+            'updates. If recovery.phase is help, ask for assistance or repositioning. No repeated chatter. Choose none during pending transcript/goal review, '
             'speech, pending answer or busy audio. Wake listening permits speech. A new speech_request is '
-            'unanswered even if similar older speech exists. Rejected replies may be rephrased, not repeated '
-            'verbatim.',
+            'unanswered even if similar older speech exists. Your choice authorizes one LFM reply for direct playback without a second review.',
             "criteria": SPEECH_TOOLS},
-        "speech_choice": {"type": "choice", "instructions":
-            'Select a supplied candidate appropriate to speech_purpose and accepted request. Ground facts in '
-            'dialogue, actual events and fresh observations. Reject invented facts/completion, repetition, '
-            'gibberish, offensive insults, JSON or instructions read aloud. Sass and promises of the approved '
-            'next action are welcome; promises are not completion. All unsuitable: reject. No candidates or busy '
-            'audio: wait. A currently requested introduction or announcement may repeat earlier speech. '
-            'For an explicit talk step or speech_request, judge that current request, not an older user message. '
-            'Decisions are independent; this approves no future output.',
-            "criteria": {"wait": "No candidates yet or audio is busy.", "reject": "None of the provided replies is suitable.",
-                         "1": "Speak candidate 1.", "2": "Speak candidate 2.", "3": "Speak candidate 3."}},
         "goal_complete": {"type": "noul", "instructions":
             'Do actual events and observations prove ALL parts of current_step complete in order? Intentions, '
             'candidate speech, attempts and old dialogue are not completion. Require actual playback for speech '
@@ -108,27 +86,19 @@ def questions():
     }
 
 
-    # Separate the current recovery branch from ordinary navigation guidance.
-    # Parallel activity/speech answers cannot supply premises to this question.
-    schema["movement"]["instructions"] = {
-        "question": "Which motor action should Mauricio perform now? Choose only from `allowed_movements`.",
-        "recovery_priority": {
-            "retreat": "When `recovery.phase` is retreat, choose backward to make turning room or stop to reassess. Forward undoes recovery.",
-            "turn": "When `recovery.phase` is turn, choose left or right toward `steering_advice` or the observed opening. Keep a consistent direction; stop if needed.",
-            "observe": "When `recovery.phase` is observe, choose stop to obtain the post-turn scene.",
-            "help": "When `recovery.phase` is help, choose stop. The retreat budget is exhausted; await human guidance. Do not back up again.",
-        },
-        "ordinary_navigation": schema["movement"]["instructions"],
-        "scope": "Ordinary navigation guidance applies only when `recovery` is null. Recovery preserves the main task.",
+    phase = ((state or {}).get("recovery") or {}).get("phase")
+    recovery_questions = {
+        "retreat": "Choose backward to make turning room, or stop to reassess current observations. Forward undoes recovery.",
+        "turn": "Choose left or right toward steering_advice or a visible opening, keeping a consistent direction. Stop if reassessment is needed.",
+        "observe": "Choose stop while obtaining a scene captured after the turn.",
+        "help": "Choose stop while asking for human guidance; the recovery budget is exhausted.",
     }
-
-    for index in range(1, 4):
-        schema[f"speech_{index}_ok"] = {"type": "noul", "instructions":
-            f"Is speech_candidates[{index - 1}] a valid spoken response to the CURRENT speech_request or current talk step? "
-            "A requested introduction or greeting is valid without sensor evidence. "
-            "Future intent to do the accepted task is valid before action. "
-            "Reject fabricated observations, false completion, gibberish, prompt instructions read aloud, "
-            "and missing candidates. Older dialogue is background, not the current request."}
+    if phase in recovery_questions:
+        schema["movement"]["instructions"] = (
+            "Choose Mauricio's next motor action during the CURRENT recovery phase. "
+            + recovery_questions[phase] +
+            " Choose only from allowed_movements. Stop for inactive mission, explicit stop, active command listening/transcribing or stale vision. "
+            "Wake listening/transcribing and speaking do not themselves require stopping. Preserve the main mission.")
 
     return schema
 
@@ -154,14 +124,16 @@ class JevClient:
         self.schema = questions()
 
     def evaluate(self, state):
+        schema = questions(state)
+        record("jev_questions", questions=schema)
         # No automatic retries: replaying an old physical state would be unsafe.
         response = self.session.post("https://api.typesafe.ai/v1/systemone",
             headers={"Authorization": f"Bearer {self.api_key}"},
-            json={"model": self.model, "state": state, "questions": self.schema},
+            json={"model": self.model, "state": state, "questions": schema},
             timeout=(0.5, 0.65))
         response.raise_for_status()
         payload = response.json()
-        return {"model": payload.get("model"), "answers": validate_answers(payload, self.schema)}
+        return {"model": payload.get("model"), "answers": validate_answers(payload, schema)}
 
     def close(self):
         self.session.close()

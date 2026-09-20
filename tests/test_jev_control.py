@@ -195,7 +195,7 @@ class DecisionLifecycle(unittest.TestCase):
         c.future.set_result({'answers': answers(), 'model': 'test'})
         c.last_sent = 'forward'
         c.pending_transcript = c.goal_request = c.goal_proposal = None
-        c.speech_candidates = []
+        c.speech_reply = None
         c.speech_request = c.speech_purpose = None
         c.speech_pending = False
         c.prior_status = 'idle'
@@ -208,7 +208,7 @@ class DecisionLifecycle(unittest.TestCase):
         c.link.command.side_effect = lambda action: action
         c.audit = Mock()
         c.context = Mock(return_value=c.store.context() | dict(sensors=telemetry(), vision={'fresh': True},
-            audio_state='idle', allowed_movements=['stop'], speech_candidates=[]))
+            audio_state='idle', allowed_movements=['stop'], speech_pending=False))
         c.request_state = c.context()
         return c
 
@@ -223,6 +223,21 @@ class DecisionLifecycle(unittest.TestCase):
             c.handle_decision(time.monotonic())
             c.link.command.assert_called_once_with('stop')
             self.assertEqual(c.store.data['step_index'], 0)
+
+    def test_talk_activity_does_not_override_independent_forward_choice(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.bare_controller(d)
+            c.store.install('Deliver item', [{'kind': 'goal', 'instruction': 'Deliver item', 'completion': 'Delivered'}])
+            c.request_epoch = c.epoch
+            c.context.return_value.update(status='active', allowed_movements=['stop', 'forward'])
+            c.request_state = dict(c.context.return_value)
+            a = answers()
+            a['activity']['choice'] = 'talk'
+            a['movement']['choice'] = 'forward'
+            c.future = Future()
+            c.future.set_result({'answers': a, 'model': 'test'})
+            c.handle_decision(time.monotonic())
+            c.link.command.assert_called_once_with('forward')
 
     def test_help_blocks_a_model_reverse_but_allows_its_help_question(self):
         with tempfile.TemporaryDirectory() as d:
@@ -460,75 +475,43 @@ class DecisionLifecycle(unittest.TestCase):
             self.assertEqual(c.store.data['goal'], 'Find table')
             self.assertEqual(c.speech_request, 'Did you get what I was saying?')
 
-    def test_speech_generation_waits_for_jev_choice(self):
+    def test_authorized_speech_plays_without_second_jev_review(self):
         with tempfile.TemporaryDirectory() as d:
             c = self.bare_controller(d)
             c.tools.results = __import__('queue').Queue()
-            c.tools.results.put({'kind':'speech', 'tool':'answer_user', 'revision':c.epoch,
-                                 'value':['One', 'Two', 'Three']})
+            c.tools.results.put({'kind': 'speech', 'tool': 'answer_user', 'revision': c.epoch,
+                                 'value': 'Watch these wheels'})
+            c.handle_tools()
+            c.audio.speak.assert_called_once_with('Watch these wheels', False, c.epoch)
+            self.assertIsNone(c.speech_reply)
+
+    def test_authorized_question_waits_for_microphone_then_plays_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.bare_controller(d)
+            c.audio.status.return_value = 'listening'
+            c.tools.results = __import__('queue').Queue()
+            c.tools.results.put({'kind': 'speech', 'tool': 'ask_person_about_situation',
+                                 'revision': c.epoch, 'value': 'Can you make some room'})
             c.handle_tools()
             c.audio.speak.assert_not_called()
-            c.request_epoch = c.epoch
-            c.request_state['speech_candidates'] = list(c.speech_candidates)
-            a = answers()
-            a['speech_choice']['choice'] = '2'
-            a['speech_2_ok']['noul'] = 0.99
-            c.future = Future()
-            c.future.set_result({'answers':a, 'model':'test'})
-            c.handle_decision(time.monotonic())
-            c.audio.speak.assert_called_once_with('Two', False, c.epoch)
+            c.audio.status.return_value = 'wake_listening'
+            c.play_pending_speech()
+            c.play_pending_speech()
+            c.audio.speak.assert_called_once_with('Can you make some room', True, c.epoch)
 
-    def test_failed_acknowledgment_offers_fallback_once_for_jev_review(self):
-        with tempfile.TemporaryDirectory() as d:
-            c = self.bare_controller(d)
-            c.acknowledgment_needed = True
-            c.offer_acknowledgment_fallback()
-            self.assertEqual(len(c.speech_candidates), 3)
-            self.assertTrue(c.speech_pending)
-            c.audio.speak.assert_not_called()
-            c.speech_candidates = []
-            c.offer_acknowledgment_fallback()
-            self.assertEqual(c.speech_candidates, [])
-
-    def test_jev_cannot_approve_candidates_it_has_not_seen(self):
+    def test_new_goal_waits_for_jev_speech_purpose(self):
         with tempfile.TemporaryDirectory() as d:
             c = self.bare_controller(d)
             c.request_epoch = c.epoch
-            c.speech_candidates = ['One', 'Two', 'Three']
+            c.goal_request = c.goal_proposal = 'Dance for me'
+            c.request_state['goal_proposal'] = c.goal_proposal
             a = answers()
-            a['speech_choice']['choice'] = '1'
-            c.future = Future()
-            c.future.set_result({'answers':a, 'model':'test'})
-            c.handle_decision(time.monotonic())
-            c.audio.speak.assert_not_called()
-
-    def test_preferred_but_ungrounded_reply_is_not_spoken(self):
-        with tempfile.TemporaryDirectory() as d:
-            c = self.bare_controller(d)
-            c.request_epoch = c.epoch
-            c.speech_candidates = ['Invented fact', 'Also invented', 'Nonsense']
-            c.request_state['speech_candidates'] = list(c.speech_candidates)
-            a = answers()
-            a['speech_choice']['choice'] = '1'
-            c.future = Future()
-            c.future.set_result({'answers':a, 'model':'test'})
-            c.handle_decision(time.monotonic())
-            c.audio.speak.assert_not_called()
-            self.assertEqual(c.speech_candidates, [])
-
-    def test_missing_candidate_cannot_be_played_from_partial_batch(self):
-        with tempfile.TemporaryDirectory() as d:
-            c = self.bare_controller(d)
-            c.request_epoch = c.epoch
-            c.speech_candidates = ['One valid reply']
-            c.request_state['speech_candidates'] = list(c.speech_candidates)
-            a = answers()
-            a['speech_choice']['choice'] = '3'
-            a['speech_3_ok']['noul'] = 0.99
+            a['approve_goal']['noul'] = .99
             c.future = Future()
             c.future.set_result({'answers': a, 'model': 'test'})
             c.handle_decision(time.monotonic())
-            c.audio.speak.assert_not_called()
+            c.tools.submit.assert_not_called()
+            self.assertEqual(c.speech_request, 'Dance for me')
 
     def test_emergency_stop_does_not_wait_for_jev(self):
         with tempfile.TemporaryDirectory() as d:
@@ -543,9 +526,9 @@ class DecisionLifecycle(unittest.TestCase):
             c = self.bare_controller(d)
             c.tools.results = __import__('queue').Queue()
             c.tools.results.put({'kind':'speech', 'tool':'answer_user', 'revision':c.epoch - 1,
-                                 'value':['One', 'Two', 'Three']})
+                                 'value':'Old reply'})
             c.handle_tools()
-            self.assertEqual(c.speech_candidates, [])
+            self.assertIsNone(c.speech_reply)
             c.audio.speak.assert_not_called()
 
 

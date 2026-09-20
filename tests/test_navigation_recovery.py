@@ -66,11 +66,14 @@ class RecoveryReplay(unittest.TestCase):
         self.assertEqual(self.r.allowed(['stop', 'backward']), ['stop'])
 
     def test_improvement_does_not_allow_unbounded_reverse(self):
-        self.feed()
+        self.feed(100)
         for i in range(25):
-            self.feed(250 + i * 4, motion='backward')
+            self.feed(100 + i * 5, motion='backward')
+        self.assertEqual(self.r.phase, 'retreat')
+        for i in range(20):
+            self.feed(225 + i * 5, motion='backward')
         self.assertEqual(self.r.phase, 'help')
-        self.assertGreaterEqual(self.r.reverse_s, 2)
+        self.assertGreaterEqual(self.r.reverse_s, 4)
 
     def test_stops_do_not_count_as_reverse_attempts_and_timeout_asks_help(self):
         self.feed()

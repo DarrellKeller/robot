@@ -28,14 +28,12 @@ class SpeechGeneration(unittest.TestCase):
             worker._execute(Job(0, 1, 'vision', 'describe_scene', {}, 0), None, None, {})
         worker._generate.assert_not_called()
 
-    def test_history_reaches_template_and_empty_candidate_preserves_others(self):
+    def test_history_reaches_single_reply_generation(self):
         formatted = []
         def template(processor, config, prompt, **kwargs):
             formatted.append(prompt)
             return 'formatted'
-        generate = Mock(side_effect=[SimpleNamespace(text=''),
-                                    SimpleNamespace(text='Watch these wheels'),
-                                    SimpleNamespace(text='You got it')])
+        generate = Mock(return_value=SimpleNamespace(text='Watch these wheels'))
         modules = {'mlx_vlm': SimpleNamespace(generate=generate),
                    'mlx_vlm.prompt_utils': SimpleNamespace(apply_chat_template=template)}
         state = {'dialogue': [{'role': 'user', 'text': 'Dance for me'}], 'sensors': {},
@@ -43,6 +41,7 @@ class SpeechGeneration(unittest.TestCase):
         with patch.dict(sys.modules, modules):
             result = LFMTools.__new__(LFMTools)._generate(
                 Job(0, 1, 'speech', 'answer_user', state, 0), None, None, {})
-        self.assertEqual(result, ['Watch these wheels', 'You got it'])
+        self.assertEqual(result, 'Watch these wheels')
+        generate.assert_called_once()
         self.assertIn({'role': 'user', 'content': 'Dance for me'}, formatted[0])
         self.assertIn('Current request: Dance', formatted[0][-1]['content'])

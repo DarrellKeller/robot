@@ -17,7 +17,7 @@ from lfm_tools import Camera, LFMTools, DEFAULT_LFM_MODEL
 from mission_store import MissionStore, validate_plan
 from navigation_recovery import Recovery
 from robot_link import RobotLink, allowed_movements, SENSOR_NAMES
-from robot_schemas import Transcript, GoalDraft, SpeechCandidates
+from robot_schemas import Transcript, GoalDraft, SpeechReply
 from runtime_log import start_trace, record, close_trace
 
 ROOT = Path(__file__).resolve().parent
@@ -72,7 +72,7 @@ class Controller:
         self.pending_transcript = None
         self.goal_request = None
         self.goal_proposal = None
-        self.speech_candidates = []
+        self.speech_reply = None
         self.speech_purpose = None
         self.speech_request = None
         self.activity = "wait"
@@ -111,15 +111,13 @@ class Controller:
             self.on_user(args.goal)
 
     def invalidate(self):
-        self.acknowledgment_needed = False
-        self.acknowledgment_fallback_used = False
         self.epoch += 1
         self.audio.invalidate(self.epoch)
         self.last_decision_at = 0
         self.speech_pending = False
         self.speech_completes_step = False
         self.desired_vision = None
-        self.speech_candidates = []
+        self.speech_reply = None
         self.speech_purpose = None
         self.speech_request = None
         self.goal_request = None
@@ -163,7 +161,7 @@ class Controller:
                      speech_pending=self.speech_pending, dance_motion_seconds=round(self.dance_seconds, 2),
                      dance_completed=self.dance_seconds >= 4, activity=self.activity,
                      pending_transcript=self.pending_transcript, goal_request=self.goal_request,
-                     goal_proposal=self.goal_proposal, speech_candidates=self.speech_candidates,
+                     goal_proposal=self.goal_proposal,
                      speech_purpose=self.speech_purpose, speech_request=self.speech_request)
         state["allowed_movements"] = self.store.recovery.allowed(state["allowed_movements"])
         return state
@@ -257,15 +255,12 @@ class Controller:
             self.speech_completes_step = completes_step
             self.speech_requested_at = time.monotonic()
 
-    def offer_acknowledgment_fallback(self):
-        if not getattr(self, "acknowledgment_needed", False) or getattr(self, "acknowledgment_fallback_used", False):
+    def play_pending_speech(self):
+        if not self.speech_reply or self.audio.status() in {"talking", "listening", "transcribing", "disabled"}:
             return
-        self.acknowledgment_fallback_used = True
-        self.speech_candidates = ["Got it let me try that", "Okay I heard you", "All right I will give it a go"]
-        self.speech_purpose = "answer_user"
-        self.speech_pending = True
-        self.speech_requested_at = time.monotonic()
-        record("acknowledgment_fallback", candidates=self.speech_candidates, epoch=self.epoch)
+        if self.audio.speak(self.speech_reply, self.speech_purpose == "ask_person_about_situation", self.epoch):
+            record("speech_dispatched", text=self.speech_reply, purpose=self.speech_purpose, epoch=self.epoch)
+            self.speech_reply = None
 
     def handle_tools(self):
         for result in drain(self.tools.results):
@@ -285,7 +280,6 @@ class Controller:
                 if kind == "speech":
                     self.speech_pending = False
                     self.last_speech_at = time.monotonic()
-                    self.offer_acknowledgment_fallback()
                 continue
             value = result["value"]
             if kind == "vision":
@@ -298,9 +292,9 @@ class Controller:
                 self.goal_proposal = GoalDraft(goal=value).goal
                 logging.info("GOAL draft awaiting Jev: %s", value)
             elif kind == "speech":
-                self.speech_candidates = SpeechCandidates(candidates=value).candidates
+                self.speech_reply = SpeechReply(text=value).text
                 self.speech_purpose = result["tool"]
-                logging.info("SPEECH candidates awaiting Jev: %s", json.dumps(value))
+                self.play_pending_speech()
 
     def handle_audio(self):
         for event in drain(self.audio.events):
@@ -321,7 +315,6 @@ class Controller:
                     self.store.outcome("speech", "playback_failed")
                     continue
                 self.store.utterance("assistant", event["text"])
-                self.acknowledgment_needed = False
                 self.store.goal_event("spoken", event["text"])
                 self.speech_request = None
                 logging.info("SPOKEN: %s", event["text"])
@@ -365,7 +358,7 @@ class Controller:
         answers = response["answers"]
         record("jev_decision", request=self.request_state, response=response,
                latency_s=now - self.request_at, epoch=self.epoch)
-        # Decisions refer to the exact pending input/candidates in request_state.
+        # Decisions refer to the exact pending input in request_state.
         if self.pending_transcript:
             if self.request_state.get("pending_transcript") == self.pending_transcript:
                 route = answers["user_route"]
@@ -383,10 +376,6 @@ class Controller:
                     self.invalidate()
                     if self.audio.enabled:
                         self.speech_request = original
-                        self.acknowledgment_needed = True
-                        # The approved goal already authorizes this reversible
-                        # draft. Jev still selects and approves actual playback.
-                        self.request_speech("answer_user", self.context())
                     logging.info("GOAL approved by Jev: %s", goal)
                     record("goal_approved", goal=goal, original_request=original)
                 else:
@@ -407,37 +396,23 @@ class Controller:
         self.activity = activity["choice"]
         step = self.store.step
         action = choose_movement(answers, state, now - self.request_at)
-        if not step or step["kind"] not in {"navigate", "dance", "goal"} or self.activity not in {"navigate", "dance"}:
+        if not step or step["kind"] not in {"navigate", "dance", "goal"} or self.activity not in {"navigate", "dance", "talk"}:
             action = "stop"
         if step and step["kind"] == "dance" and action in {"forward", "backward"}:
             action = "stop"
         self.last_sent = self.link.command(action)
-        record("motion_dispatch", requested=action, sent=self.last_sent, sensors=state["sensors"])
+        record("motion_dispatch", model_choice=answers["movement"]["choice"], requested=action,
+               sent=self.last_sent, sensors=state["sensors"], vision_fresh=state["vision"].get("fresh"),
+               allowed_movements=state["allowed_movements"], activity=self.activity, status=state["status"],
+               audio_state=state["audio_state"], awaiting_user_answer=state["awaiting_user_answer"],
+               recovery_phase=(state.get("recovery") or {}).get("phase"))
         if action != self.last_sent:
             self.store.outcome(action, "host_clearance_gate")
         if answers["should_remember"]["noul"] >= YES_THRESHOLD and state["vision"].get("fresh"):
             self.store.remember(state["vision"])
         if answers["need_fresh_vision"]["noul"] >= YES_THRESHOLD and "vision" not in self.tools.status():
             self.desired_vision = "describe_scene"
-        if self.speech_candidates and self.request_state.get("speech_candidates") == self.speech_candidates:
-            selection = answers["speech_choice"]
-            if selection["choice"] != "wait":
-                choice = selection["choice"]
-                if (choice == "reject" or int(choice) > len(self.speech_candidates)
-                    or answers[f"speech_{choice}_ok"]["noul"] < YES_THRESHOLD):
-                    self.speech_candidates = []
-                    self.speech_pending = False
-                    self.last_speech_at = now
-                    self.store.outcome("speech", "all_candidates_rejected_by_jev")
-                    self.offer_acknowledgment_fallback()
-                elif state["audio_state"] not in {"talking", "listening", "transcribing", "disabled"}:
-                    selected = self.speech_candidates[int(choice) - 1]
-                    ask = self.speech_purpose == "ask_person_about_situation"
-                    if self.audio.speak(selected, ask, self.epoch):
-                        logging.info("Jev approved speech candidate %s: %s", choice, selected)
-                        record("speech_approved", choice=choice, text=selected, epoch=self.epoch)
-                        self.speech_candidates = []
-        elif not self.goal_request:
+        if not self.goal_request:
             speech = answers["lfm_speech_tool"]
             if speech["choice"] != "none":
                 self.request_speech(speech["choice"], state,
@@ -466,6 +441,7 @@ class Controller:
         now = time.monotonic()
         self.handle_audio()
         self.handle_tools()
+        self.play_pending_speech()
         state = self.context()
         self.store.observe_motion(state["sensors"])
         transition = self.store.recovery.update(state["sensors"], state["vision"], now,

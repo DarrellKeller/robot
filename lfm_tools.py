@@ -10,7 +10,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from robot_schemas import GoalDraft, SpeechCandidates, SceneDescription
+from robot_schemas import GoalDraft, SpeechReply, SceneDescription
 from runtime_log import record, capture_frame
 
 
@@ -145,8 +145,7 @@ class LFMTools:
             started = time.monotonic()
             formatted = apply_chat_template(processor, config, prompt, num_images=1 if images else 0)
             kwargs = {"image": images} if images else {}
-            # Yield the local inference engine between candidate replies so a
-            # queued microphone transcription need not wait for the whole batch.
+            # Only inference holds the shared device; control and playback remain independent.
             with LOCAL_INFERENCE_LOCK:
                 output = generate(model, processor, formatted, max_tokens=limit,
                                   temperature=temperature, verbose=False, **kwargs)
@@ -196,24 +195,15 @@ class LFMTools:
                  f"Accepted request: {context.get('speech_request') or 'use the current task'}.\n"
                  "Recorded events: " + '; '.join(str(e) for e in (context.get('goal_events') or [])[-6:]) +
                  "\nRecent outcomes: " + '; '.join(str(e) for e in (context.get('recent_attempts') or [])[-3:]))
-        candidates = []
-        for tone in ("dry wit", "playfully confident", "warm and cheeky"):
-            prompt = [{"role": "system", "content": SPEECH_PROMPT +
-                       f"\nTone: {tone}. Speech purpose: {job.tool}.\n" + facts}]
-            prompt.extend(context["dialogue"])
-            purpose = {"ask_person_about_situation": "Ask one useful question to help with the current task.",
-                       "status_update": "Say the requested announcement or give a useful task update.",
-                       "celebrate": "Briefly celebrate the recorded completion."}.get(job.tool, "Reply to the accepted request.")
-            target = context.get("speech_request") or step.get("instruction") or "Reply to the latest accepted user message"
-            prompt.append({"role": "user", "content": f"{purpose}\nCurrent request: {target}\nOnly say your spoken reply."})
-            try:
-                candidate = infer(prompt, 80, temperature=0.8).strip('"').strip()
-                if candidate:
-                    candidates.append(candidate)
-            except ValueError:
-                # One empty generation must not discard usable alternatives.
-                continue
-        return SpeechCandidates(candidates=candidates).candidates
+        prompt = [{"role": "system", "content": SPEECH_PROMPT +
+                   f"\nSpeech purpose: {job.tool}.\n" + facts}]
+        prompt.extend(context["dialogue"])
+        purpose = {"ask_person_about_situation": "Ask one useful question to help with the current task.",
+                   "status_update": "Say the requested announcement or give a useful task update.",
+                   "celebrate": "Briefly celebrate the recorded completion."}.get(job.tool, "Reply to the accepted request.")
+        target = context.get("speech_request") or step.get("instruction") or "Reply to the latest accepted user message"
+        prompt.append({"role": "user", "content": f"{purpose}\nCurrent request: {target}\nOnly say your spoken reply."})
+        return SpeechReply(text=infer(prompt, 80, temperature=0.8).strip('"').strip()).text
 
     def _execute(self, job, model, processor, config):
         if job.kind == "vision":

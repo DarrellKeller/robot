@@ -4,6 +4,7 @@ from robot_link import SENSOR_NAMES, CLEARANCE_MM
 CLEAR_MM = 400
 CLEAR_HOLD_S = 0.3
 REVERSE_LIMIT_S = 2.0
+IMPROVING_REVERSE_LIMIT_S = 4.0
 ATTEMPT_S = 0.5
 IMPROVEMENT_MM = 20
 TURN_DEGREES = 20
@@ -93,7 +94,8 @@ class Recovery:
                     self.phase = "turn"
             else:
                 self.clear_since = None
-            if self.phase == "retreat" and (self.reverse_s >= REVERSE_LIMIT_S or self.bad_attempts >= FAILED_ATTEMPT_LIMIT):
+            reverse_limit = IMPROVING_REVERSE_LIMIT_S if self.trend == "improving" else REVERSE_LIMIT_S
+            if self.phase == "retreat" and (self.reverse_s >= reverse_limit or self.bad_attempts >= FAILED_ATTEMPT_LIMIT):
                 self.phase, self.reason = "help", "Reverse budget exhausted or clearance failed to improve"
         elif self.phase == "turn":
             if (sensors.get("motion") in {"left", "right"} and sensors.get("imu_valid")

@@ -3,8 +3,8 @@
 Jev makes short, typed decisions from ToF, MPU heading, local vision, dialogue,
 subgoals and recent outcomes. Python owns execution and persistence. The ESP32
 owns motor output, continuous sensor acquisition, a command
-watchdog. LFM2.5-VL-3B supplies scene descriptions, candidate replies and short goal drafts.
-Jev screens user input, approves goals, and selects every generated reply before playback.
+watchdog. LFM2.5-VL-3B supplies scene descriptions, spoken replies and short goal drafts.
+Jev screens user input, approves goals, and chooses when and why to speak. LFM generates one reply that goes directly to playback.
 Normal startup begins with fresh goals, dialogue, visual memories and motion
 history, so moving Mauricio to a new location does not carry over an old room.
 Only `--resume` explicitly restores saved mission context. Per-run diagnostic
@@ -13,16 +13,16 @@ With audio enabled, a newly approved task requests a brief cheeky acknowledgment
 Acknowledgment generation and playback do not block valid movement; speech
 and movement can run concurrently. Explicit `talk` steps still require actual playback to complete.
 Spoken replies become shared event history; the accepted request remains the goal.
-Without audio, the task starts directly. LFM drafts up to three replies; a failed
-candidate does not discard the usable ones, and Jev can only play an existing,
-independently approved candidate. Local inference yields between candidates to
-allow microphone transcription.
+Without audio, the task starts directly. Speech uses one generation at temperature
+0.8, with no candidate ranking, grounding vote or second Jev review. New input
+invalidates old speech; playback waits while the microphone captures a command.
+Piper's existing punctuation cleanup still applies.
 
 ## Architecture
 
 - `autonomous_control.py`: entry point; runs the Jev controller by default.
 - `jev_control.py`: independent decision, vision, audio and telemetry scheduling.
-- `jev_client.py`: TypeSafe HTTP client and typed decisions and input/output approval gates.
+- `jev_client.py`: TypeSafe HTTP client, typed decisions and input/goal approval.
 - `robot_link.py`: single serial reader and protocol-v2 movement dispatch.
 - `mission_store.py`: atomic persistence of subgoals, dialogue, observed motion,
   recovery outcomes and selected visual memories.
@@ -43,8 +43,6 @@ question holds motion until answered or listening times out.
 | `user_route` | Choice | Reject noise, clarify, chat, goal, answer, cancel, resume |
 | `approve_goal` | Noul | Check a goal draft against the accepted request |
 | `activity` | Choice | Navigate, dance, talk, listen or wait within the shared goal |
-| `speech_choice` | Choice | Select candidate 1/2/3, reject all, or wait |
-| `speech_1_ok` / `speech_2_ok` / `speech_3_ok` | Noul | Independently check each candidate for relevance and grounding |
 | `lfm_speech_tool` | Choice | None, question, answer, update, celebration |
 | `goal_complete` | Noul | Completion evidence for the current subgoal |
 | `should_remember` | Noul | Retain the current observation as a sourced fact |
@@ -200,17 +198,17 @@ people's visible appearance/actions, and readable text, with the shared goal as
 search context. The same observation runs during idle conversation and active goals.
 There are no separate goal-search, person-inspection or text-reading tools.
 
-Jev authorizes speech generation. LFM proposes three replies at temperature 0.8,
-with Mauricio's playful, sassy personality. Jev chooses a candidate and independently checks its grounding, or
-rejects all of them; only its selected reply reaches Piper. Candidates are tied
-to the current input revision and cannot be approved by an older request.
+Jev authorizes one speech generation through `lfm_speech_tool`. LFM's reply plays
+directly with Mauricio's personality. There is no output-content approval loop.
+Stale results from an earlier input revision are discarded, and actual playback
+is recorded before a talk step completes.
 
 Jev gets up to 24 accepted messages (roughly 12 exchanges), the shared goal,
 current observation, ToF/MPU feedback, eight route segments, six outcomes, twelve
 remembered observations and up to 24 goal events. LFM speech gets the last 12 accepted
 messages, the same goal/current task, scene freshness, measured motor state, six
 recent goal events and three outcomes. Goal rewriting uses the last six accepted
-messages plus the approved request. Vision uses the image and shared goal. Pydantic validates goal drafts, exactly three nonempty candidate replies, transcription
+messages plus the approved request. Vision uses the image and shared goal. Pydantic validates goal drafts, exactly three nonempty spoken replies, transcription
 quality and every returned Jev decision. Validation enforces shape, not truth; Jev
 approval is a separate gate. Neither
 model keeps hidden conversation memory between calls. Version-1 unscreened dialogue
@@ -344,9 +342,8 @@ The firmware lease stops it automatically;
 `x` stops it immediately. This
 command is not exposed to Jev or the normal Python movement API.
 
-New-task acknowledgment drafts receive the actual accepted request. If the first
-draft fails or is rejected, three short acknowledgment fallbacks are offered once
-for Jev to approve; none bypasses speech approval or claims task completion.
+New-task acknowledgments use the accepted request. Jev must select a speech
+purpose before generation; there are no acknowledgment candidate fallbacks.
 
 ### Temporary obstacle recovery
 
@@ -368,7 +365,8 @@ Both Jev and LFM speech receive the current recovery objective and steering advi
   any other main-task completion.
 - **help:** stop and ask for guidance or repositioning. Enter after three
   half-second reverse intervals without at least 2 cm clearance improvement,
-  two seconds total reported reverse motion, 1.5 seconds of unsuccessful pivoting,
+  two seconds total reported reverse motion (extended to at most four seconds
+  while measured clearance is improving), 1.5 seconds of unsuccessful pivoting,
   or 20 seconds of active recovery without completion. A Jev-accepted answer,
   steering instruction or explicit resume allows a new attempt.
 
@@ -381,3 +379,16 @@ and recovery cannot complete the main task. Inactive missions never start recove
 Transitions and evidence are recorded as `recovery_transition` events and mission
 `goal_events`; snapshots include compact progress independently of speech errors.
 No firmware update is needed for this host-only change.
+
+Movement questions include only the current recovery phase, when one exists.
+Historical recovery events do not keep a cleared recovery active. Background wake
+listening/transcription and concurrent speech do not themselves call for stop.
+Unknown ToF directions remain unknown; they do not veto all movement when fresh
+vision shows an assessed route. The user's report of cargo on Mauricio's back
+is not contradicted by the front camera failing to see it. Each request logs its
+actual question set as `jev_questions`.
+
+For navigation-capable steps, a talk activity no longer suppresses an independent
+movement choice. Listen/wait activities and explicit talk-only steps still stop.
+Motion logs include the raw model choice and dispatch constraints so a model
+stop can be distinguished from a host override.

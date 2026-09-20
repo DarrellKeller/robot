@@ -16,8 +16,8 @@ class GoalDraft(Contract):
     goal: Text
 
 
-class SpeechCandidates(Contract):
-    candidates: Annotated[list[Reply], Field(min_length=1, max_length=3)]
+class SpeechReply(Contract):
+    text: Reply
 
 
 class SceneDescription(Contract):
@@ -59,9 +59,5 @@ class JevDecisions(Contract):
     movement: ChoiceAnswer[Literal['forward', 'backward', 'left', 'right', 'stop']]
     need_fresh_vision: NoulAnswer
     lfm_speech_tool: ChoiceAnswer[Literal['none', 'ask_person_about_situation', 'answer_user', 'status_update', 'celebrate']]
-    speech_choice: ChoiceAnswer[Literal['wait', 'reject', '1', '2', '3']]
     goal_complete: NoulAnswer
     should_remember: NoulAnswer
-    speech_1_ok: NoulAnswer
-    speech_2_ok: NoulAnswer
-    speech_3_ok: NoulAnswer
