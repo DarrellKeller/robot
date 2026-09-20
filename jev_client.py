@@ -100,13 +100,12 @@ def questions():
 
     for index in range(1, 4):
         schema[f"speech_{index}_ok"] = {"type": "noul", "instructions":
-            f"Is speech_candidates[{index - 1}] suitable to say aloud for speech_purpose? "
-            "Independently require a relevant, understandable reply with facts grounded in dialogue/events/fresh vision. "
-            "Reject invented facts/completion, gibberish, echoed questions and instructions read aloud. "
-            "Preserve requested announcements. A brief acknowledgment promising the approved task is suitable "
-            "before execution; it needs no evidence of completion. A currently requested introduction or "
-            "announcement may repeat earlier speech. For a talk step/speech_request, that is the current request; "
-            "older user messages are background. Playful sass is allowed. Missing: no."}
+            f"Is speech_candidates[{index - 1}] a valid spoken response to the CURRENT speech_request or current talk step? "
+            "A requested introduction or greeting is valid without sensor evidence. "
+            "Future intent to do the accepted task is valid before action. "
+            "Reject fabricated observations, false completion, gibberish, prompt instructions read aloud, "
+            "and missing candidates. Older dialogue is background, not the current request."}
+
     return schema
 
 
