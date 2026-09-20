@@ -15,7 +15,7 @@ from audio_controller import AudioController
 from jev_client import JevClient
 from lfm_tools import Camera, LFMTools
 from mission_store import MissionStore, validate_plan
-from robot_link import RobotLink, allowed_movements
+from robot_link import RobotLink, allowed_movements, SENSOR_NAMES
 from robot_schemas import Transcript, GoalDraft, SpeechCandidates
 
 ROOT = Path(__file__).resolve().parent
@@ -146,6 +146,12 @@ class Controller:
         rate = sensors.get("yaw_rate_dps", 0)
         sensors["rotation"] = "left" if rate > 2 else "right" if rate < -2 else "approximately_stationary"
         state.update(sensors=sensors, allowed_movements=allowed_movements(sensors), vision=vision,
+                     hardware_context={
+                         "tof_reliability": "Intermittent usable ranges on this chassis. All five sensors communicate through a mux; out_of_range is not proof of disconnected hardware or clear space.",
+                         "unknown_directions": [name for name, value in zip(SENSOR_NAMES, sensors.get("tof_mm", [None] * 5)) if value is None],
+                         "navigation_guidance": "Use valid ranges as obstacle evidence and fresh camera observations to assess unknown directions. Prefer brief, observable movements and reassess. Ask the user if the route cannot be judged. Do not repeatedly wait solely because a ToF return is missing.",
+                         "heading_reliability": "Gyro heading is relative and drifts; short-term changes are more useful than absolute heading. Translation is not measured."
+                     },
                      audio_state=self.audio.status(), tools=self.tools.status(),
                      speech_pending=self.speech_pending, dance_motion_seconds=round(self.dance_seconds, 2),
                      dance_completed=self.dance_seconds >= 4, activity=self.activity,

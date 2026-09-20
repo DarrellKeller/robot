@@ -1,0 +1,10 @@
+{
+  "intent": "new_goal",
+  "steps": [
+    {
+      "kind": "talk",
+      "instruction": "Say: Mauricio's online—tiny wheels, enormous attitude! What's the mission?",
+      "completion": "The introduction and invitation finished playing."
+    }
+  ]
+}
