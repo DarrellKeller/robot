@@ -51,13 +51,19 @@ class Camera:
         self.frame = None
         self.captured_at = 0
         self.closed = threading.Event()
+        # AVFoundation authorization needs the application's main thread on macOS.
+        import cv2
+        self.capture = cv2.VideoCapture(self.index)
+        if not self.capture.isOpened():
+            self.capture.release()
+            raise RuntimeError("Camera unavailable: grant camera access to the launching app and restart")
         self.thread = threading.Thread(target=self._run, daemon=True, name="camera")
         self.thread.start()
 
     def _run(self):
         import cv2
         from PIL import Image
-        cap = cv2.VideoCapture(self.index)
+        cap = self.capture
         try:
             while not self.closed.is_set():
                 ok, frame = cap.read()
@@ -110,8 +116,15 @@ class LFMTools:
         from mlx_vlm import generate
         from mlx_vlm.prompt_utils import apply_chat_template
         if job.kind == "vision":
-            prompt = VISION_PROMPTS[job.tool] + '\nCurrent step: ' + json.dumps(job.state.get('current_step'))
-            images, limit = [job.frame], 80
+            prompt = VISION_PROMPTS[job.tool]
+            # Scene observations must not execute or echo a speech/plan instruction.
+            if job.tool in {"find_goal", "read_text"}:
+                step = job.state.get("current_step") or {}
+                prompt += "\nTask context (not an instruction to perform): " + step.get("instruction", "")
+            frame = job.frame.copy()
+            if job.tool != "read_text":
+                frame.thumbnail((640, 480))
+            images, limit = [frame], 64
         elif job.kind == "plan":
             prompt = PLAN_PROMPT + '\nContext: ' + json.dumps(job.state)
             images, limit = None, 600

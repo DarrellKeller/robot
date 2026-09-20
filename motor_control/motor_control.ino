@@ -156,20 +156,21 @@ void readCommands() {
   }
 }
 
-// Read only ready measurements. No wait-for-range loops in motor operation.
+// One single-shot measurement per loop, through exactly one mux channel.
+// Preserve other sensors' last readings while their turn is pending. The library's
+// two polling phases are each bounded by the 30 ms timeout; service commands and
+// the watchdog between sensors, rather than blocking on an entire five-sensor scan.
 void pollRange() {
   static uint8_t i = 0;
   if (sensorReady[i] && selectChannel(channels[i])) {
-    uint8_t ready = sensors[i].readReg(VL53L0X::RESULT_INTERRUPT_STATUS);
-    if (sensors[i].last_status != 0) rangeValid[i] = false;
-    else if (ready & 7) {
-      uint16_t mm = sensors[i].readReg16Bit(VL53L0X::RESULT_RANGE_STATUS + 10);
-      bool ok = sensors[i].last_status == 0 && mm > 0 && mm < 8190;
-      sensors[i].writeReg(VL53L0X::SYSTEM_INTERRUPT_CLEAR, 1);
-      rangeValid[i] = ok && sensors[i].last_status == 0;
-      rangeMM[i] = mm; rangeAt[i] = millis();
-    }
-  } else rangeValid[i] = false;
+    uint16_t mm = sensors[i].readRangeSingleMillimeters();
+    rangeValid[i] = !sensors[i].timeoutOccurred() && sensors[i].last_status == 0
+                    && mm > 0 && mm < 8190;
+    rangeMM[i] = mm;
+    rangeAt[i] = millis();
+  } else {
+    rangeValid[i] = false;
+  }
   i = (i + 1) % 5;
 }
 
@@ -201,7 +202,8 @@ void setup() {
     sensorReady[i] = sensors[i].init();
     if (sensorReady[i]) {
       sensors[i].setMeasurementTimingBudget(20000);
-      sensors[i].startContinuous(40);
+      // Runtime reads are single-shot; no other sensor ranges concurrently.
+      sensors[i].setTimeout(30);
     }
   }
   imuReady = initializeIMU();
@@ -213,6 +215,8 @@ void loop() {
   if (strcmp(motion, "stop") && (long)(millis() - leaseUntil) >= 0) halt("lease_expired");
   updateGyro();
   pollRange();
+  if (strcmp(motion, "stop") && (long)(millis() - leaseUntil) >= 0) halt("lease_expired");
+  updateGyro();
   readCommands();
   if (strcmp(motion, "stop") && !clearFor(motion)) halt("clearance_or_sensor");
   telemetry();

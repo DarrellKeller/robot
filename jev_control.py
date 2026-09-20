@@ -356,6 +356,11 @@ class Controller:
             self.store.outcome("speech", "deadline_exceeded")
         if now - self.last_save_at >= 1:
             self.store.save()
+            # Headless diagnostics: no camera images or credentials in this snapshot.
+            status_path = self.args.state.parent / 'status.json'
+            status_tmp = status_path.with_suffix('.tmp')
+            status_tmp.write_text(json.dumps({"updated_at": time.time(), **self.context()}, indent=2))
+            status_tmp.replace(status_path)
             self.last_save_at = now
 
     def run(self):

@@ -67,7 +67,9 @@ Local models:
 - Whisper: `mlx-community/whisper-base.en-mlx`.
 - Piper: place `en_US-ryan-high.onnx` and its JSON config beside `tts_module.py`.
 
-Grant camera and microphone access to the terminal/app used to run Python.
+Grant camera and microphone access to the terminal/app used to run Python before
+disconnecting the display. On macOS, check Privacy & Security → Camera and
+Microphone for Terminal. Camera authorization is requested on the main thread.
 **Do not run `wakeword_server.py` alongside the Jev controller.** Audio is now
 owned by the controller itself. The old server remains for the legacy path.
 
@@ -118,7 +120,9 @@ a question, it listens automatically without requiring another wake word.
 interrupt TTS; Ctrl-C and the serial `x` stop are independent of audio.
 
 Active missions load paused on restart. Use `--resume` explicitly. Runtime state
-and bounded decision logs live under ignored `runtime/`; `--state PATH` selects
+and bounded decision logs live under ignored `runtime/`. A once-per-second
+`status.json` snapshot reports sensors, audio, tools and task state for headless
+diagnostics; `--state PATH` selects
 another store. Decision logs include the sent state, answers and dispatched action.
 They can contain private dialogue and observations; keep them local.
 
@@ -177,9 +181,12 @@ Initial settings are deliberately explicit and need chassis testing:
 - Firmware: each motion lease is 600 ms; maximum accepted lease is 650 ms.
   Renewing an action continues it smoothly. Expiry stops motors; it does not
   grant permission to keep moving for an entire subgoal.
-- Firmware samples ready ToF measurements without waiting for a new range and
-  reports telemetry every 50 ms in every mode. Invalid/stale ranges are `null`,
-  never “clear.” MPU is polled throughout movement, including turns.
+- Firmware takes one single-shot ToF measurement per loop, selecting exactly one
+  PCA/TCA9548A channel. Other sensors retain their last readings while awaiting
+  their turn. Commands, watchdog and MPU are serviced between measurements.
+  Each library polling phase has a 30 ms timeout (two phases per measurement).
+  Telemetry is emitted at the first loop opportunity after 50 ms, in every mode.
+  Invalid/stale ranges are `null`, never “clear.” MPU is polled during turns too.
 - Motion requires five healthy ToF readings and a fresh calibrated MPU. Forward
   checks the three forward-facing ranges; pivots check all five, at 300 mm.
   Reverse is not exposed because rear coverage is absent. PWM defaults to 100.

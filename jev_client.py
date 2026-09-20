@@ -16,7 +16,7 @@ VISION_TOOLS = {"general_scene": "Describe layout, objects, openings and hazards
 SPEECH_TOOLS = {"none": "No speech needed, or speech/question is already pending.",
                 "ask_person_about_situation": "Ask one question that resolves missing information.",
                 "answer_user": "Answer the most recent unanswered user message.",
-                "status_update": "Give a useful, brief update not already spoken.",
+                "status_update": "Deliver the requested announcement for an unfulfilled talk step, or give a useful update not already spoken.",
                 "celebrate": "Acknowledge completion briefly, once."}
 
 
@@ -40,7 +40,9 @@ def questions():
             "Which speech, if any, is useful now for `current_step` or the user's latest message? "
             "Use none when speech_pending is true, audio is talking/listening/transcribing, "
             "the same information was already spoken, or an answer is pending. Wake listening does not prevent requesting speech. "
-            "Use `dialogue` and `tools` to avoid repetition.", "criteria": SPEECH_TOOLS},
+            "Use `dialogue` and `tools` to avoid repetition. A talk step is a request to speak now, not evidence of past speech. "
+            "Its completion field describes a requirement, not an event that already happened. "
+            "When a talk step requests an announcement and no matching assistant dialogue exists, choose status_update.", "criteria": SPEECH_TOOLS},
         "goal_complete": {"type": "noul", "instructions":
             "Do current observations satisfy `current_step.completion`? This refers only to the current subgoal. "
             "A command being issued or an attempted recovery does not prove success. "
