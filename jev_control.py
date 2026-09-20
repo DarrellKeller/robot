@@ -22,6 +22,7 @@ from runtime_log import start_trace, record, close_trace
 ROOT = Path(__file__).resolve().parent
 DECISION_MAX_AGE = 0.45
 DECISION_CONFIDENCE = 0.75  # Initial settings; validate on recorded robot scenarios.
+SPEECH_DRAFT_CONFIDENCE = 0.4  # Reversible generation only; playback has a separate grounding gate.
 YES_THRESHOLD = 0.8
 VISION_MAX_AGE = 2.0
 
@@ -401,7 +402,7 @@ class Controller:
                         self.speech_candidates = []
         elif not self.goal_request:
             speech = answers["lfm_speech_tool"]
-            if speech["choice"] != "none" and speech["confidence"] >= DECISION_CONFIDENCE:
+            if speech["choice"] != "none" and speech["confidence"] >= SPEECH_DRAFT_CONFIDENCE:
                 self.request_speech(speech["choice"], state,
                     completes_step=bool(step and step["kind"] == "talk"))
         if state["status"] == "active":
