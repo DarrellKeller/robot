@@ -58,6 +58,8 @@ def questions():
             "Choose Mauricio's next brief movement for current_step and the shared goal. "
             "Mauricio is an energetic curious robot who makes progress rather than waiting by default. "
             "Choose only from allowed_movements and use fresh vision, measured ranges and recent_route. "
+            "Combine them: vision identifies routes and directions, valid ToF gives measured distance. "
+            "Do not mistake a large object in the narrow camera view for an immediate obstacle when ranges show room ahead. "
             "When a clear floor route or doorway lies ahead, prefer forward to explore it even if the final target is unseen. "
             "Use a brief pivot to align an off-center route, then forward once aligned. Pivoting alone makes no travel progress. "
             "If the camera faces a wall with no forward route, pivot to find an opening. "

@@ -60,6 +60,13 @@ progress. Action descriptions specify both wheels' directions and expected
 camera-view changes, matching `main`'s forward/reverse/applyPivot wiring.
 Stop remains available for concrete reasons to remain still.
 
+Jev uses valid ToF readings as measured depth in their respective directions;
+one missing return does not discredit the other sensors. Vision identifies
+objects, openings and their relative directions. The camera view is reported
+to be narrow/zoomed in, so apparent object size is not a distance measurement.
+These are complementary inputs; a clear range ray alone does not establish
+the width of a whole passage.
+
 ## Setup
 
 Install Python requirements in the project's environment:

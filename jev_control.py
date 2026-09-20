@@ -150,7 +150,8 @@ class Controller:
         sensors["rotation"] = "left" if rate > 2 else "right" if rate < -2 else "approximately_stationary"
         state.update(sensors=sensors, allowed_movements=allowed_movements(sensors), vision=vision,
                      hardware_context={
-                         "tof_reliability": "ToF readings may be unreliable. Mux sensors reporting out_of_range are not necessarily disconnected; unknown range is not clear space. Compare valid ranges with vision.",
+                         "range_interpretation": "Use valid ToF measurements for depth: tof_cm gives centimeters at L90 (left), L45 (front-left), F (ahead), R45 (front-right), R90 (right). Each measures its own direction, not the entire passage. Null/out_of_range means unknown in that direction; it does not invalidate the other readings.",
+                         "camera_geometry": "The user reports a narrow, zoomed-in camera view that makes objects appear closer. Apparent image size and descriptive words like close are not measured distance. Use vision for object/opening identity and bearing, and valid ToF ranges for distance. There is no calibrated image-to-distance conversion.",
                          "unknown_directions": [name for name, value in zip(SENSOR_NAMES, sensors.get("tof_mm", [None] * 5)) if value is None],
                          "heading_reliability": "Gyro heading is relative and drifts; short-term changes are more useful than absolute heading. Translation is not measured."
                      },
