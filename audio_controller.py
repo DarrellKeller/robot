@@ -87,9 +87,10 @@ class AudioController:
                 elif voiced and silent_since is None:
                     silent_since = time.monotonic()
                 elapsed = time.monotonic() - started
-                if not command and (elapsed >= 2 or not self.jobs.empty()):
+                if not command and (elapsed >= 1.5 or not self.jobs.empty()
+                                    or (silent_since and time.monotonic() - silent_since >= 0.5)):
                     break
-                if command and (elapsed >= 15 or (silent_since and time.monotonic() - silent_since >= 1.5)):
+                if command and (elapsed >= 15 or (silent_since and time.monotonic() - silent_since >= 0.75)):
                     break
         finally:
             stream.stop_stream()

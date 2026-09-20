@@ -356,6 +356,9 @@ class Controller:
                     self.invalidate()
                     if self.audio.enabled:
                         self.speech_request = "Briefly acknowledge the accepted task in Mauricio's cheeky voice. Say what you will do next without claiming completion."
+                        # The approved goal already authorizes this reversible
+                        # draft. Jev still selects and approves actual playback.
+                        self.request_speech("answer_user", self.context())
                     logging.info("GOAL approved by Jev: %s", goal)
                     record("goal_approved", goal=goal, original_request=original)
                 else:

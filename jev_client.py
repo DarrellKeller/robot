@@ -12,10 +12,10 @@ GOAL_APPROVAL_THRESHOLD = 0.9
 COMPLETION_THRESHOLD = 0.9
 
 MOVEMENTS = {
-    "forward": "Advance toward a visible target or opening along a clear route permitted by allowed_movements.",
-    "backward": "Briefly retreat from a front obstruction along recently traversed space; rear range sensors are absent. Reassess after each short movement.",
-    "left": "Default search direction when the target is unseen or a wall fills the view: briefly pivot left if allowed. Also turn toward a target on the left or perform a requested left dance pivot.",
-    "right": "Briefly pivot right toward a target on the right, when left is blocked, to continue an already productive rightward sweep, or for a requested right dance pivot.",
+    "forward": "Both wheels drive forward: translate in the direction the camera faces, bringing ahead objects closer. Explore a visible clear floor route or doorway even when the final target is not yet visible.",
+    "backward": "Both wheels drive backward: retreat opposite the camera direction; front objects recede. Briefly back away from a front obstruction over recently traversed space. No rear range sensors.",
+    "left": "Left wheel backward, right wheel forward: pivot in place counterclockwise, without travelling toward the target. The camera looks farther left; stationary objects shift right. Use to align with a route on the left or look away from a blocked view.",
+    "right": "Left wheel forward, right wheel backward: pivot in place clockwise, without travelling toward the target. The camera looks farther right; stationary objects shift left. Use to align with a route on the right or look away from a blocked view.",
     "stop": "Remain still for a concrete reason: explicit stop, inactive goal, active listening, stale vision, all useful movements blocked, or visible hazard making even a pivot unsuitable."
 }
 SPEECH_TOOLS = {
@@ -58,13 +58,15 @@ def questions():
             "Choose Mauricio's next brief movement for current_step and the shared goal. "
             "Mauricio is an energetic curious robot who makes progress rather than waiting by default. "
             "Choose only from allowed_movements and use fresh vision, measured ranges and recent_route. "
-            "If the target is not visible, or the camera faces a wall, prefer an allowed left/right pivot to look elsewhere. "
+            "When a clear floor route or doorway lies ahead, prefer forward to explore it even if the final target is unseen. "
+            "Use a brief pivot to align an off-center route, then forward once aligned. Pivoting alone makes no travel progress. "
+            "If the camera faces a wall with no forward route, pivot to find an opening. "
             "A wall ahead blocks forward travel toward it, not automatically an in-place pivot. "
             "Continue a useful search sweep; avoid switching left/right repeatedly without gaining a new view. "
             "Do not circle endlessly: once a person is found for asking a mission, face them and stop to talk/listen. "
             "If repeated pivots reveal the same scene, choose a visible route, brief backward retreat over recent space, or ask for help. "
             "When multiple pivots are reasonable, pick one rather than stop merely because there is no unique best direction. "
-            "Use left as the initial search direction when neither side has a specific advantage. "
+            "Choose left or right according to the visible opening; neither is the default navigation action. "
             "Missing ToF readings mean unknown range, not free space and not an automatic reason to wait. "
             "Use the visible surroundings to assess a brief pivot; do not drive blindly into unseen space. "
             "Stop for explicit user stop, inactive/screening mission, active listening, stale vision, "
