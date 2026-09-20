@@ -72,6 +72,7 @@ const char* stopReason = "startup";
 char commandBuffer[80];
 size_t commandLength = 0;
 bool discardCommand = false;
+bool wheelTest = false;
 
 bool initializeIMU();
 void calibrateGyro(int samples = 1000);
@@ -85,6 +86,7 @@ void stopMotors() {
 }
 
 void halt(const char* reason) {
+  wheelTest = false;
   stopMotors(); motion = "stop"; stopReason = reason;
 }
 
@@ -101,6 +103,7 @@ bool freshIMU() {
 bool clearFor(const char* action) {
   if (!strcmp(action, "stop")) return true;
   if (!freshIMU()) return false;
+  if (wheelTest) return true; // Explicit held-up wheel test only; lease still expires.
   // Missing returns are unknown. Only fresh, detected obstacles veto motion.
   // Turns sweep the chassis, so check valid returns in every direction.
   for (int i = 0; i < 5; ++i) {
@@ -128,6 +131,18 @@ void applyMotion() {
 void acceptCommand(char* line) {
   unsigned long id, ttl;
   char action[12], extra;
+  // Manual bench diagnostic, deliberately absent from Jev's action schema.
+  // One bounded forward run ignores ToF readings caused by the holder's hands.
+  if (sscanf(line, "WHEEL_TEST,%lu%c", &ttl, &extra) == 1) {
+    halt("test_start");
+    if (!ttl || ttl > 6000) { halt("bad_test_duration"); return; }
+    if (!freshIMU()) { halt("imu_unavailable"); return; }
+    wheelTest = true;
+    motion = "forward"; stopReason = "wheel_test"; leaseUntil = millis() + ttl;
+    applyMotion();
+    return;
+  }
+  wheelTest = false;
   if (sscanf(line, "M,%lu,%11[^,],%lu%c", &id, action, &ttl, &extra) != 3) {
     halt("bad_command"); return;
   }

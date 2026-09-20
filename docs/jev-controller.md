@@ -315,3 +315,9 @@ The robot has no rear range sensor; Jev is instructed to retreat briefly over
 recently traversed space and reassess. Front obstacles do not prevent retreat.
 Whisper metadata is normalized before validation; transcription failures are
 logged and the listener continues instead of silently terminating.
+
+For a manually supervised test with wheels held off the ground,
+`WHEEL_TEST,6000` runs both wheels forward at DRIVE_PWM for up to 6000 ms,
+ignoring ToF only during that run. The firmware lease stops it automatically;
+`x` stops it immediately. A normal command also ends the ToF bypass. This
+command is not exposed to Jev or the normal Python movement API.
