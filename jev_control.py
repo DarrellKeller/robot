@@ -150,9 +150,8 @@ class Controller:
         sensors["rotation"] = "left" if rate > 2 else "right" if rate < -2 else "approximately_stationary"
         state.update(sensors=sensors, allowed_movements=allowed_movements(sensors), vision=vision,
                      hardware_context={
-                         "tof_reliability": "ToF readings may be unreliable. All five sensors communicate through a mux; out_of_range is not proof of disconnected hardware or clear space. Assess usable readings against the current scene and recent measurements rather than assuming all readings are faulty.",
+                         "tof_reliability": "ToF readings may be unreliable. Mux sensors reporting out_of_range are not necessarily disconnected; unknown range is not clear space. Compare valid ranges with vision.",
                          "unknown_directions": [name for name, value in zip(SENSOR_NAMES, sensors.get("tof_mm", [None] * 5)) if value is None],
-                         "navigation_guidance": "Use valid ranges as obstacle evidence and fresh camera observations to assess unknown directions. If the target is unseen or the camera faces a wall, use an allowed brief search pivot and reassess. Initially search left when neither side has an advantage. Forward travel requires a visually assessed route. Ask the user when no useful movement remains. Missing ToF alone is not a reason to wait.",
                          "heading_reliability": "Gyro heading is relative and drifts; short-term changes are more useful than absolute heading. Translation is not measured."
                      },
                      audio_state=self.audio.status(), tools=self.tools.status(),
@@ -347,11 +346,19 @@ class Controller:
             if self.request_state.get("goal_proposal") == self.goal_proposal:
                 if answers["approve_goal"]["noul"] >= GOAL_APPROVAL_THRESHOLD:
                     goal, original = self.goal_proposal, self.goal_request
-                    self.store.install(goal, [{"kind": "goal", "instruction": goal,
-                        "completion": "All requested actions completed in order, with actual evidence."}])
+                    steps = [{"kind": "goal", "instruction": goal,
+                        "completion": "All requested actions completed in order, with actual evidence."}]
+                    if self.audio.enabled:
+                        steps.insert(0, {"kind": "talk", "instruction":
+                            "Briefly acknowledge the accepted task in Mauricio's cheeky voice. "
+                            "Say what you are about to do, without claiming it is done or adding a new task.",
+                            "completion": "The Jev-approved acknowledgment has actually been spoken."})
+                    self.store.install(goal, steps)
                     self.store.data["goal_user_request"] = original
                     self.dance_seconds, self.dance_recorded = 0, False
                     self.invalidate()
+                    if self.store.step["kind"] == "talk":
+                        self.speech_request = self.store.step["instruction"]
                     logging.info("GOAL approved by Jev: %s", goal)
                     record("goal_approved", goal=goal, original_request=original)
                 else:

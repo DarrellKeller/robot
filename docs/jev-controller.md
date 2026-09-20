@@ -5,6 +5,12 @@ subgoals and recent outcomes. Python owns execution and persistence. The ESP32
 owns motor output, continuous sensor acquisition, clearance checks and a command
 watchdog. LFM2.5-VL-450M supplies scene descriptions, candidate replies and short goal drafts.
 Jev screens user input, approves goals, and selects every generated reply before playback.
+With audio enabled, a newly approved user task starts with an existing `talk`
+step: a brief cheeky acknowledgment, then the task itself. Only successful
+playback advances that step; failed playback or rejected candidates cannot
+start motion. The spoken reply becomes shared event history for Jev's next
+decision, while the accepted user request remains the goal. Without audio,
+the task starts directly.
 
 ## Architecture
 
@@ -71,6 +77,9 @@ JEV_MODEL=jev-1.13.0
 
 The version is pinned because model changes can affect calibrated thresholds.
 The client sends state and typed questions to `https://api.typesafe.ai/v1/systemone`.
+It sends the question definitions, not the Python source file. Static movement
+policy lives in those questions; hardware context contains reliability facts
+rather than repeating the navigation instructions.
 It does not retry an old physical snapshot; the loop backs off and submits fresh
 state after errors. Never put keys into tracked files or CLI arguments.
 

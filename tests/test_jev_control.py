@@ -305,9 +305,47 @@ class DecisionLifecycle(unittest.TestCase):
             c.future.set_result({'answers':a, 'model':'test'})
             c.handle_decision(time.monotonic())
             self.assertEqual(c.store.data['goal'], 'Dance for the user')
-            self.assertEqual(c.store.step['kind'], 'goal')
+            self.assertEqual(c.store.step['kind'], 'talk')
+            self.assertTrue(c.speech_request)
             self.assertEqual(c.store.data['goal_user_request'], 'Dance for me')
             c.link.command.assert_called_with('stop')
+            # Independent Jev choices cannot bypass the acknowledgment step.
+            a['activity']['choice'] = 'dance'
+            a['movement']['choice'] = 'left'
+            a['goal_complete']['noul'] = 0.99
+            c.request_epoch = c.epoch
+            c.context.return_value = c.store.context() | dict(sensors=telemetry(),
+                vision={'fresh': True}, audio_state='idle', allowed_movements=['left', 'stop'])
+            c.future = Future()
+            c.future.set_result({'answers': a, 'model': 'test'})
+            c.handle_decision(time.monotonic())
+            c.link.command.assert_called_with('stop')
+            self.assertEqual(c.store.step['kind'], 'talk')
+            # Generation/approval alone must not advance into movement.
+            c.speech_completes_step = True
+            c.audio.events = __import__('queue').Queue()
+            c.audio.events.put({'kind': 'speech_failed', 'revision': c.epoch})
+            c.handle_audio()
+            self.assertEqual(c.store.step['kind'], 'talk')
+            c.audio.events.put({'kind': 'spoken', 'revision': c.epoch,
+                                'text': 'Watch these wheels I am about to dance', 'ask': False})
+            c.handle_audio()
+            self.assertEqual(c.store.step['kind'], 'goal')
+            self.assertEqual(c.store.data['goal_events'][-1]['kind'], 'spoken')
+
+    def test_goal_without_audio_does_not_wait_for_acknowledgment(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.bare_controller(d)
+            c.audio.enabled = False
+            c.request_epoch = c.epoch
+            c.goal_request = c.goal_proposal = 'Dance for me'
+            c.request_state['goal_proposal'] = c.goal_proposal
+            a = answers()
+            a['approve_goal']['noul'] = 0.99
+            c.future = Future()
+            c.future.set_result({'answers': a, 'model': 'test'})
+            c.handle_decision(time.monotonic())
+            self.assertEqual(c.store.step['kind'], 'goal')
 
     def test_rejected_goal_rewrite_falls_back_to_review_not_execution(self):
         with tempfile.TemporaryDirectory() as d:
