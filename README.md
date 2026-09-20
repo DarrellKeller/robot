@@ -5,7 +5,9 @@ vision and language, **Whisper/Piper** for conversation, and an **ESP32** for
 motor control and continuous ToF/MPU feedback.
 
 Movement, vision and speech run independently. Recovery uses the same Jev
-questions with recent outcomes as context. Code owns subgoals, persistence,
+questions with recent outcomes as context. Jev screens transcriptions, approves
+shared goals and selects among three LFM replies. One vision prompt describes the
+scene, people and text in three sentences. Code owns persistence,
 command expiry and sensor checks.
 
 ## Getting started

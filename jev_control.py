@@ -16,6 +16,7 @@ from jev_client import JevClient
 from lfm_tools import Camera, LFMTools
 from mission_store import MissionStore, validate_plan
 from robot_link import RobotLink, allowed_movements
+from robot_schemas import Transcript, GoalDraft, SpeechCandidates
 
 ROOT = Path(__file__).resolve().parent
 DECISION_MAX_AGE = 0.45
@@ -65,7 +66,14 @@ class Controller:
         self.speech_requested_at = 0
         self.speech_completes_step = False
         self.last_speech_at = -100
-        self.user_pending = None
+        self.pending_transcript = None
+        self.goal_request = None
+        self.goal_proposal = None
+        self.speech_candidates = []
+        self.speech_purpose = None
+        self.speech_request = None
+        self.activity = "wait"
+        self.dance_recorded = False
         self.prior_status = self.store.data["status"]
         self.request_state = None
         self.request_at = 0
@@ -104,12 +112,20 @@ class Controller:
         self.speech_pending = False
         self.speech_completes_step = False
         self.desired_vision = None
+        self.speech_candidates = []
+        self.speech_purpose = None
+        self.speech_request = None
+        self.goal_request = None
+        self.goal_proposal = None
+        self.pending_transcript = None
+        self.activity = "wait"
         self.link.command("stop")
         self.last_sent = "stop"
 
     def advance(self):
         self.store.advance()
         self.dance_seconds = 0
+        self.dance_recorded = False
         self.step_overdue_recorded = False
         self.invalidate()
 
@@ -131,29 +147,62 @@ class Controller:
         sensors["rotation"] = "left" if rate > 2 else "right" if rate < -2 else "approximately_stationary"
         state.update(sensors=sensors, allowed_movements=allowed_movements(sensors), vision=vision,
                      audio_state=self.audio.status(), tools=self.tools.status(),
-                     speech_pending=self.speech_pending, dance_motion_seconds=round(self.dance_seconds, 2))
+                     speech_pending=self.speech_pending, dance_motion_seconds=round(self.dance_seconds, 2),
+                     dance_completed=self.dance_seconds >= 4, activity=self.activity,
+                     pending_transcript=self.pending_transcript, goal_request=self.goal_request,
+                     goal_proposal=self.goal_proposal, speech_candidates=self.speech_candidates,
+                     speech_purpose=self.speech_purpose, speech_request=self.speech_request)
         return state
 
-    def on_user(self, text):
+    def on_user(self, text, quality=None):
         text = text.strip()[:1000]
         if not text:
             return
+        prior = self.prior_status if self.store.data["status"] in {"screening", "drafting"} else self.store.data["status"]
         self.invalidate()
-        self.store.utterance("user", text)
+        self.prior_status = prior
+        # Local emergency stop is never delayed by model approval.
         if text.lower().strip(' .!?') in {"stop", "cancel", "stop moving", "cancel task"}:
+            self.store.utterance("user", text)
             self.store.data.update(status="paused", pending_question=None, last_outcome="user_stopped")
             self.store.changed()
-            self.user_pending = None
             return
-        if text.lower().strip(' .!?') in {"resume", "continue"} and self.store.step:
-            self.store.data.update(status="active", pending_question=None)
+        self.pending_transcript = Transcript(text=text, quality=quality or {}).model_dump()
+        self.store.data["status"] = "screening"
+        self.store.changed()
+        logging.info("TRANSCRIPT awaiting Jev: %s", text)
+
+    def route_user(self, route):
+        text = self.pending_transcript["text"]
+        self.pending_transcript = None
+        self.store.data["status"] = self.prior_status
+        logging.info("Jev transcript route: %s", route)
+        if route == "ignore":
+            self.store.outcome("transcript", "rejected_by_jev")
+            return
+        if route == "clarify":
+            # Do not leak questionable recognized words to LFM.
+            self.store.data.update(status="paused", pending_question=None)
+            self.speech_request = "Ask the user to repeat; the last transcription was unclear."
             self.store.changed()
             return
-        if self.store.data["status"] != "planning":
-            self.prior_status = self.store.data["status"]
-        self.store.data["status"] = "planning"
+        self.store.utterance("user", text)
+        if route == "cancel":
+            self.store.data.update(status="paused", pending_question=None)
+        elif route == "resume":
+            self.store.data.update(status="active" if self.store.step else "idle", pending_question=None)
+        elif route == "goal":
+            self.goal_request = text
+            self.store.data.update(status="drafting", pending_question=None)
+        elif route == "answer":
+            self.store.data.update(status="active" if self.store.step else "idle", pending_question=None)
+            self.store.goal_event("user_answer", text)
+            if self.store.step and self.store.step["kind"] == "listen":
+                self.advance()
+        else:
+            self.store.data["pending_question"] = None
+            self.speech_request = text
         self.store.changed()
-        self.user_pending = text
 
     def request_vision(self, tool, state, priority=2):
         if not self.camera:
@@ -188,13 +237,11 @@ class Controller:
             kind = result["kind"]
             if "error" in result:
                 self.store.outcome(kind, "tool_failed: " + result["error"])
-                if kind == "plan":
-                    self.store.data["status"] = "paused"
-                    self.speech_completes_step = False
-                    self.speech_pending = self.audio.speak(
-                        "I heard you, but couldn't work out your request. Could you say it again?",
-                        True, self.epoch)
-                    self.speech_requested_at = time.monotonic()
+                logging.warning("LFM %s failed: %s", kind, result["error"])
+                if kind == "goal":
+                    # A failed rewrite must not strand an already accepted request.
+                    # Jev still reviews the verbatim request before installation.
+                    self.goal_proposal = self.goal_request
                 if kind == "speech":
                     self.speech_pending = False
                     self.last_speech_at = time.monotonic()
@@ -202,35 +249,21 @@ class Controller:
             value = result["value"]
             if kind == "vision":
                 self.observation = {"text": value, "captured_at": result["captured_at"],
-                                    "heading_deg": result["heading_deg"], "tool": result["tool"]}
-            elif kind == "plan":
-                intent = value["intent"]
-                if intent == "new_goal":
-                    self.store.install(self.store.data["dialogue"][-1]["text"], value["steps"])
-                    self.invalidate()
-                elif intent == "cancel":
-                    self.store.data.update(status="paused", pending_question=None)
-                    self.store.changed()
-                elif intent == "clarification":
-                    self.store.data.update(status="active" if self.store.step else "idle", pending_question=None)
-                    self.store.data["last_outcome"] = "user_clarification_received"
-                    if self.store.step and self.store.step["kind"] == "listen":
-                        self.advance()
-                    self.store.changed()
-                else:
-                    self.store.data["status"] = self.prior_status
-                    self.request_speech("answer_user", self.context())
+                                    "heading_deg": result["heading_deg"], "tool": "describe_scene"}
+                logging.info("SCENE: %s", value)
+            elif kind == "goal":
+                self.goal_proposal = GoalDraft(goal=value).goal
+                logging.info("GOAL draft awaiting Jev: %s", value)
             elif kind == "speech":
-                ask = result["tool"] == "ask_person_about_situation"
-                if not self.audio.speak(value, ask, self.epoch):
-                    self.speech_pending = False
-                    self.store.outcome("speech", "audio_unavailable")
+                self.speech_candidates = SpeechCandidates(candidates=value).candidates
+                self.speech_purpose = result["tool"]
+                logging.info("SPEECH candidates awaiting Jev: %s", json.dumps(value))
 
     def handle_audio(self):
         for event in drain(self.audio.events):
             kind = event["kind"]
             if kind == "user":
-                self.on_user(event["text"])
+                self.on_user(event["text"], event.get("quality"))
             elif kind == "listening":
                 self.link.command("stop")
                 self.last_sent = "stop"
@@ -244,6 +277,9 @@ class Controller:
                     self.store.outcome("speech", "playback_failed")
                     continue
                 self.store.utterance("assistant", event["text"])
+                self.store.goal_event("spoken", event["text"])
+                self.speech_request = None
+                logging.info("SPOKEN: %s", event["text"])
                 if event["ask"]:
                     self.store.data["pending_question"] = {"text": event["text"],
                         "step_index": self.store.data["step_index"]}
@@ -279,31 +315,78 @@ class Controller:
         self.last_decision_at = now
         state = self.context()  # Fresh sensors and tool state, not request-time state.
         answers = response["answers"]
-        action = choose_movement(answers, state, now - self.request_at)
+        # Decisions refer to the exact pending input/candidates in request_state.
+        if self.pending_transcript:
+            if self.request_state.get("pending_transcript") == self.pending_transcript:
+                route = answers["user_route"]
+                self.route_user(route["choice"] if route["confidence"] >= DECISION_CONFIDENCE else "clarify")
+            return
+        if self.goal_proposal:
+            if self.request_state.get("goal_proposal") == self.goal_proposal:
+                if answers["approve_goal"]["noul"] >= 0.9:
+                    goal, original = self.goal_proposal, self.goal_request
+                    self.store.install(goal, [{"kind": "goal", "instruction": goal,
+                        "completion": "All requested actions completed in order, with actual evidence."}])
+                    self.store.data["goal_user_request"] = original
+                    self.dance_seconds, self.dance_recorded = 0, False
+                    self.invalidate()
+                    logging.info("GOAL approved by Jev: %s", goal)
+                else:
+                    if self.goal_proposal != self.goal_request:
+                        self.goal_proposal = self.goal_request
+                        self.store.outcome("goal", "rewrite_rejected_reviewing_original_request")
+                    else:
+                        self.goal_proposal = self.goal_request = None
+                        self.store.data["status"] = "paused"
+                        self.speech_request = "Ask for a clearer achievable task; the goal was rejected."
+                        self.store.outcome("goal", "rejected_by_jev")
+            return
+        activity = answers["activity"]
+        self.activity = activity["choice"] if activity["confidence"] >= DECISION_CONFIDENCE else "wait"
         step = self.store.step
-        if step and step["kind"] != "navigate" and step["kind"] != "dance":
+        action = choose_movement(answers, state, now - self.request_at)
+        if not step or step["kind"] not in {"navigate", "dance", "goal"} or self.activity not in {"navigate", "dance"}:
             action = "stop"
         self.last_sent = self.link.command(action)
         if action != self.last_sent:
             self.store.outcome(action, "host_clearance_gate")
-        if (answers["should_remember"]["noul"] >= YES_THRESHOLD
-            and state["vision"].get("fresh")):
+        if answers["should_remember"]["noul"] >= YES_THRESHOLD and state["vision"].get("fresh"):
             self.store.remember(state["vision"])
-        if (answers["need_fresh_vision"]["noul"] >= YES_THRESHOLD
-            and answers["lfm_vision_tool"]["confidence"] >= DECISION_CONFIDENCE):
-            tool = answers["lfm_vision_tool"]["choice"]
-            pending = self.tools.status().get("vision", {})
-            if pending.get("tool") != tool:
-                self.desired_vision = tool
-        if state["status"] == "active":
-            ask = answers["should_ask_person"]["noul"] >= YES_THRESHOLD
+        if answers["need_fresh_vision"]["noul"] >= YES_THRESHOLD and "vision" not in self.tools.status():
+            self.desired_vision = "describe_scene"
+        if self.speech_candidates and self.request_state.get("speech_candidates") == self.speech_candidates:
+            selection = answers["speech_choice"]
+            if selection["choice"] != "wait":
+                choice = selection["choice"]
+                if choice == "reject" or answers[f"speech_{choice}_ok"]["noul"] < YES_THRESHOLD:
+                    self.speech_candidates = []
+                    self.speech_pending = False
+                    self.last_speech_at = now
+                    self.speech_request = None
+                    self.store.outcome("speech", "all_candidates_rejected_by_jev")
+                elif state["audio_state"] not in {"talking", "listening", "transcribing", "disabled"}:
+                    selected = self.speech_candidates[int(choice) - 1]
+                    ask = self.speech_purpose == "ask_person_about_situation"
+                    if self.audio.speak(selected, ask, self.epoch):
+                        logging.info("Jev approved speech candidate %s: %s", choice, selected)
+                        self.speech_candidates = []
+        elif not self.goal_request:
             speech = answers["lfm_speech_tool"]
-            if ask or (speech["choice"] != "none" and speech["confidence"] >= DECISION_CONFIDENCE):
-                self.request_speech(speech["choice"], state, ask, completes_step=bool(step and step["kind"] == "talk"))
-            # Speech and listening completion come from actual audio events.
+            if speech["choice"] != "none" and speech["confidence"] >= DECISION_CONFIDENCE:
+                self.request_speech(speech["choice"], state,
+                    completes_step=bool(step and step["kind"] == "talk"))
+        if state["status"] == "active":
+            if (self.activity == "listen" and not state["awaiting_user_answer"] and not self.speech_pending
+                and state["audio_state"] not in {"talking", "listening", "transcribing", "disabled"}
+                and now - self.last_speech_at >= 3):
+                if self.audio.listen(self.epoch):
+                    self.store.data["pending_question"] = {"text": step["instruction"],
+                                                          "step_index": self.store.data["step_index"]}
+                    self.store.changed()
             complete = answers["goal_complete"]["noul"] >= 0.9
-            if (step and complete and ((step["kind"] == "navigate" and state["vision"].get("fresh"))
-                                      or (step["kind"] == "dance" and self.dance_seconds >= 4))):
+            if (step and complete and not self.speech_pending and
+                ((step["kind"] in {"navigate", "goal"} and state["vision"].get("fresh"))
+                 or (step["kind"] == "dance" and self.dance_seconds >= 4))):
                 self.advance()
         self.audit.info(json.dumps({"time": time.time(), "request": self.request_state,
                                     "response": response, "dispatched_movement": self.last_sent,
@@ -318,9 +401,12 @@ class Controller:
         self.handle_tools()
         state = self.context()
         self.store.observe_motion(state["sensors"])
-        if (self.store.step and self.store.step["kind"] == "dance" and
+        if (self.store.step and self.activity == "dance" and
             state["sensors"].get("motion") in {"left", "right"} and state["sensors"].get("age_s", 1) < 0.25):
             self.dance_seconds += min(now - self.previous_tick, 0.1)
+        if self.dance_seconds >= 4 and not self.dance_recorded:
+            self.store.goal_event("dance", "At least four seconds of measured pivot motion completed")
+            self.dance_recorded = True
         self.previous_tick = now
         # Independent of API completion: stop on stale vision/sensors/audio changes.
         if (self.last_sent != "stop" and (now - self.last_decision_at > 0.5
@@ -329,33 +415,25 @@ class Controller:
             or state["status"] != "active" or state["awaiting_user_answer"])):
             self.link.command("stop")
             self.last_sent = "stop"
-        if self.user_pending and "plan" not in self.tools.status():
-            if self.tools.submit("plan", "plan", state, self.epoch, priority=0):
-                self.user_pending = None
-        if state["status"] == "active":
-            if self.desired_vision:
-                if self.request_vision(self.desired_vision, state, priority=1):
-                    self.desired_vision = None
-            elif now >= self.next_vision_at:
-                self.request_vision("general_scene", state)
-            if state["step_elapsed_s"] > 120 and not self.step_overdue_recorded:
-                self.store.outcome("current_step", "No confirmed completion within 120 seconds; reconsider approach or ask person")
-                self.step_overdue_recorded = True
-            if (self.store.step and self.store.step["kind"] == "listen" and
-                not state["awaiting_user_answer"] and not self.speech_pending and
-                state["audio_state"] not in {"listening", "transcribing", "talking", "disabled"} and
-                now - self.last_speech_at >= 3):
-                if self.audio.listen(self.epoch):
-                    self.store.data["pending_question"] = {"text": self.store.step["instruction"],
-                                                            "step_index": self.store.data["step_index"]}
-                    self.store.changed()
+        if self.goal_request and not self.goal_proposal and "goal" not in self.tools.status():
+            self.tools.submit("goal", "draft_goal", state, self.epoch, priority=0)
+        # Keep observations current during conversation as well as navigation.
+        if self.desired_vision:
+            if self.request_vision("describe_scene", state, priority=1):
+                self.desired_vision = None
+        elif now >= self.next_vision_at:
+            self.request_vision("describe_scene", state)
+        if state["status"] == "active" and state["step_elapsed_s"] > 120 and not self.step_overdue_recorded:
+            self.store.outcome("current_step", "No confirmed completion within 120 seconds; reconsider approach or ask person")
+            self.step_overdue_recorded = True
         self.handle_decision(now)
         if (self.future is None and now >= max(self.next_decision_at, self.api_retry_at)
-            and self.store.data["status"] == "active" and "plan" not in self.tools.status()):
+            and "goal" not in self.tools.status()):
             self.request_state = self.context()
             self.request_at, self.request_epoch = now, self.epoch
             self.future = self.executor.submit(self.client.evaluate, self.request_state)
-            self.next_decision_at = now + 1 / self.args.decision_hz
+            busy = self.store.data["status"] == "active" or self.pending_transcript or self.speech_pending or self.goal_proposal
+            self.next_decision_at = now + (1 / self.args.decision_hz if busy else 1)
         if self.speech_pending and now - self.speech_requested_at > 30:
             self.invalidate()
             self.store.outcome("speech", "deadline_exceeded")

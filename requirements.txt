@@ -20,3 +20,6 @@ PyAudio
 pyserial>=3.5
 python-dotenv
 requests
+
+# Typed contracts for model inputs and outputs
+pydantic>=2.12,<3

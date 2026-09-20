@@ -3,13 +3,14 @@
 Jev makes short, typed decisions from ToF, MPU heading, local vision, dialogue,
 subgoals and recent outcomes. Python owns execution and persistence. The ESP32
 owns motor output, continuous sensor acquisition, clearance checks and a command
-watchdog. LFM2.5-VL-450M supplies descriptions, speech text and proposed subgoals.
+watchdog. LFM2.5-VL-450M supplies scene descriptions, candidate replies and short goal drafts.
+Jev screens user input, approves goals, and selects every generated reply before playback.
 
 ## Architecture
 
 - `autonomous_control.py`: entry point; runs the Jev controller by default.
 - `jev_control.py`: independent decision, vision, audio and telemetry scheduling.
-- `jev_client.py`: TypeSafe HTTP client and the seven existing typed questions.
+- `jev_client.py`: TypeSafe HTTP client and typed decisions and input/output approval gates.
 - `robot_link.py`: single serial reader and protocol-v2 movement dispatch.
 - `mission_store.py`: atomic persistence of subgoals, dialogue, observed motion,
   recovery outcomes and selected visual memories.
@@ -27,8 +28,11 @@ question holds motion until answered or listening times out.
 | --- | --- | --- |
 | `movement` | Choice | `forward`, `left`, `right`, `stop` |
 | `need_fresh_vision` | Noul | Gate an additional visual inspection |
-| `lfm_vision_tool` | Choice | Scene, goal search, person inspection, text reading |
-| `should_ask_person` | Noul | Request clarification or fulfill an asking step |
+| `user_route` | Choice | Reject noise, clarify, chat, goal, answer, cancel, resume |
+| `approve_goal` | Noul | Check a goal draft against the accepted request |
+| `activity` | Choice | Navigate, dance, talk, listen or wait within the shared goal |
+| `speech_choice` | Choice | Select candidate 1/2/3, reject all, or wait |
+| `speech_1_ok` / `speech_2_ok` / `speech_3_ok` | Noul | Independently check each candidate for relevance and grounding |
 | `lfm_speech_tool` | Choice | None, question, answer, update, celebration |
 | `goal_complete` | Noul | Completion evidence for the current subgoal |
 | `should_remember` | Noul | Retain the current observation as a sourced fact |
@@ -128,16 +132,42 @@ They can contain private dialogue and observations; keep them local.
 
 ## Goals and execution
 
-LFM proposes at most eight sequential subgoals with `kind`, `instruction` and
-`completion`. Kinds are `navigate`, `dance`, `talk`, `listen`. Code validates the
-schema; LFM never dispatches motors. Jev judges navigation completion; actual
-playback and captured answers govern talk/listen completion. Dance completion
-requires at least four seconds of reported pivot motion as well as Jev's
-completion judgment. Jev selects the individual pivots; no blocking dance macro
-runs behind it.
+Raw Whisper output and recognition quality go to Jev first. Rejected text never
+enters accepted dialogue or LFM prompts. The local exact stop command remains
+immediate; the fixed wake acknowledgement "Huh?" is the only ungated spoken cue.
 
-Plan quality still needs task trials. To bypass generative planning, supply a
-reviewed JSON file with `--plan PATH`:
+There is no LFM JSON planner. After Jev approves an action request, LFM may rewrite
+it as a short plain-text goal. Jev checks the draft before code installs it. If the
+rewrite fails or changes the request, the original accepted request is presented
+to Jev for approval instead. Both models share the approved goal. Jev selects the
+next activity and motor primitive directly, including the order of compound tasks.
+Actual spoken words, captured answers and measured dance motion are retained as
+goal events; proposed replies are never completion evidence. Dance evidence requires
+four seconds of reported pivot motion. This is reactive navigation, not a mapped
+path planner.
+
+One vision prompt requests three short sentences covering scene geometry, obstacles,
+people's visible appearance/actions, and readable text, with the shared goal as
+search context. The same observation runs during idle conversation and active goals.
+There are no separate goal-search, person-inspection or text-reading tools.
+
+Jev authorizes speech generation. LFM proposes three replies at temperature 0.8,
+with Mauricio's playful, sassy personality. Jev chooses a candidate and independently checks its grounding, or
+rejects all of them; only its selected reply reaches Piper. Candidates are tied
+to the current input revision and cannot be approved by an older request.
+
+Jev gets up to 24 accepted messages (roughly 12 exchanges), the shared goal,
+current observation, ToF/MPU feedback, eight route segments, six outcomes, twelve
+remembered observations and up to 24 goal events. LFM speech gets the last 12 accepted
+messages, the same goal/current task, scene freshness, measured motor state, six
+recent goal events and three outcomes. Goal rewriting uses the last six accepted
+messages plus the approved request. Vision uses the image and shared goal. Pydantic validates goal drafts, exactly three nonempty candidate replies, transcription
+quality and every returned Jev decision. Validation enforces shape, not truth; Jev
+approval is a separate gate. Neither
+model keeps hidden conversation memory between calls. Version-1 unscreened dialogue
+is archived in the mission file but excluded from both model contexts.
+
+Manually reviewed legacy step lists remain supported with `--plan PATH`:
 
 ```json
 {
@@ -168,7 +198,7 @@ not independently verified map facts.
 
 Initial settings are deliberately explicit and need chassis testing:
 
-- Jev: up to 4 requests/second; one request in flight. Discard responses older
+- Jev: up to 4 requests/second during tasks/input handling, 1/second while idle; one request in flight. Discard responses older
   than 450 ms or belonging to an earlier goal/subgoal.
 - Vision: 1 observation/second by default, configurable up to 2. Explicit
   inspections take priority over the next background job. One pending job per

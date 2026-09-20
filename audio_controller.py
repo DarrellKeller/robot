@@ -6,8 +6,21 @@ import logging
 import re
 import threading
 import time
+from collections import Counter
+
+from robot_schemas import TranscriptQuality
 
 WAKE_WORDS = ("robot", "mauricio", "maurice", "spinny", "toad")
+
+
+def transcript_quality(result):
+    words = re.findall(r"\w+", result.get("text", "").lower())
+    triples = Counter(tuple(words[i:i + 3]) for i in range(max(0, len(words) - 2)))
+    segments = result.get("segments", [])
+    return TranscriptQuality(**{"word_count": len(words), "max_repeated_trigram": max(triples.values(), default=0),
+            "no_speech_probability": max((s.get("no_speech_prob", 0) for s in segments), default=0),
+            "compression_ratio": max((s.get("compression_ratio", 0) for s in segments), default=0),
+            "average_log_probability": min((s.get("avg_logprob", 0) for s in segments), default=0)}).model_dump()
 
 
 class AudioController:
@@ -74,7 +87,7 @@ class AudioController:
             stream.close()
         return np.concatenate(chunks) if chunks and voiced else None
 
-    def _handle_wake(self, text, tts_ready, tts_module):
+    def _handle_wake(self, text, tts_ready, tts_module, quality=None):
         match = re.search(r'\b(' + '|'.join(WAKE_WORDS) + r')\b', text, re.I)
         if not match:
             return False
@@ -87,7 +100,7 @@ class AudioController:
             logging.warning("Wake acknowledgement playback failed")
         remainder = text[match.end():].strip(' ,.!?')
         if remainder:
-            self.events.put({"kind": "user", "text": remainder})
+            self.events.put({"kind": "user", "text": remainder, "quality": quality or {}})
             return False
         return True
 
@@ -133,12 +146,15 @@ class AudioController:
                     continue
                 self._state("transcribing" if was_command else "wake_transcribing")
                 with LOCAL_INFERENCE_LOCK:
-                    text = mlx_whisper.transcribe(captured,
-                        path_or_hf_repo="mlx-community/whisper-base.en-mlx", language="en").get("text", "").strip()
+                    result = mlx_whisper.transcribe(captured,
+                        path_or_hf_repo="mlx-community/whisper-base.en-mlx", language="en",
+                        condition_on_previous_text=False)
+                text = result.get("text", "").strip()
+                quality = transcript_quality(result)
                 if was_command:
-                    self.events.put({"kind": "user" if text else "listen_timeout", "text": text})
+                    self.events.put({"kind": "user" if text else "listen_timeout", "text": text, "quality": quality})
                     continue
-                listen_next = self._handle_wake(text, tts_ready, tts_module)
+                listen_next = self._handle_wake(text, tts_ready, tts_module, quality)
         except Exception as exc:
             self.events.put({"kind": "audio_error", "error": type(exc).__name__})
         finally:

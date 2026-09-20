@@ -7,7 +7,7 @@ import os
 import time
 from pathlib import Path
 
-KINDS = {"navigate", "dance", "talk", "listen"}
+KINDS = {"navigate", "dance", "talk", "listen", "goal"}
 
 
 def validate_plan(value):
@@ -32,16 +32,22 @@ def validate_plan(value):
 class MissionStore:
     def __init__(self, path):
         self.path = Path(path)
-        self.data = {"version": 1, "goal": "", "steps": [], "step_index": 0,
+        self.data = {"version": 2, "goal": "", "steps": [], "step_index": 0,
                      "status": "idle", "memory": [], "dialogue": [], "recent_attempts": [],
-                     "recent_route": [], "pending_question": None, "last_outcome": "startup"}
+                     "recent_route": [], "goal_events": [], "pending_question": None, "last_outcome": "startup"}
         if self.path.exists():
             saved = json.loads(self.path.read_text())
-            if saved.get("version") != 1:
+            if saved.get("version") not in {1, 2}:
                 raise ValueError("Unsupported mission store version")
             self.data.update(saved)
+            if saved["version"] == 1:
+                # Preserve pre-screening transcripts on disk, but do not treat them
+                # as Jev-approved conversation or feed them back to either model.
+                self.data["legacy_dialogue"] = self.data["dialogue"]
+                self.data["dialogue"] = []
+                self.data["version"] = 2
             # A saved mission never restarts physical movement automatically.
-            if self.data["status"] == "active":
+            if self.data["status"] in {"active", "screening", "drafting"}:
                 self.data["status"] = "paused"
             self.data["pending_question"] = None
         self.revision = 0
@@ -60,13 +66,18 @@ class MissionStore:
 
     def utterance(self, role, text):
         self.data["dialogue"].append({"role": role, "text": text[:1000]})
-        self.data["dialogue"] = self.data["dialogue"][-12:]
+        self.data["dialogue"] = self.data["dialogue"][-24:]
         self.changed()
 
     def install(self, goal, plan):
         self.data.update(goal=goal[:1000], steps=plan, step_index=0, status="active",
-                         recent_attempts=[], pending_question=None, last_outcome="goal_started")
+                         recent_attempts=[], goal_events=[], pending_question=None, last_outcome="goal_started")
         self.step_started = time.monotonic()
+        self.changed()
+
+    def goal_event(self, kind, detail):
+        self.data["goal_events"].append({"kind": kind, "detail": detail})
+        self.data["goal_events"] = self.data["goal_events"][-24:]
         self.changed()
 
     def advance(self):
@@ -121,6 +132,7 @@ class MissionStore:
 
     def context(self):
         d = copy.deepcopy(self.data)
+        d.pop("legacy_dialogue", None)
         attempts = d["recent_attempts"]
         repeated = len(attempts) >= 2 and attempts[-1] == attempts[-2]
         d.update(current_step=copy.deepcopy(self.step),
