@@ -3,7 +3,7 @@
 Jev makes short, typed decisions from ToF, MPU heading, local vision, dialogue,
 subgoals and recent outcomes. Python owns execution and persistence. The ESP32
 owns motor output, continuous sensor acquisition, a command
-watchdog. LFM2.5-VL-450M supplies scene descriptions, candidate replies and short goal drafts.
+watchdog. LFM2.5-VL-3B supplies scene descriptions, candidate replies and short goal drafts.
 Jev screens user input, approves goals, and selects every generated reply before playback.
 Normal startup begins with fresh goals, dialogue, visual memories and motion
 history, so moving Mauricio to a new location does not carry over an old room.
@@ -100,7 +100,8 @@ state after errors. Never put keys into tracked files or CLI arguments.
 
 Local models:
 
-- Vision, speech text and plan proposals: `mlx-community/LFM2.5-VL-450M-6bit`.
+- Vision, speech text and goal proposals: `LiquidAI/LFM2.5-VL-3B-MLX-6bit`.
+  Override with `--lfm-model MODEL_ID` for comparisons; prompts stay the same.
 - Whisper: `mlx-community/whisper-base.en-mlx`.
 - Piper: place `en_US-ryan-high.onnx` and its JSON config beside `tts_module.py`.
 
@@ -146,7 +147,7 @@ Other options:
 python autonomous_control.py --help
 python autonomous_control.py --no-audio --no-camera --duration 10
 python autonomous_control.py --live --resume
-python autonomous_control.py --vision-hz 2
+python autonomous_control.py --vision-hz 0.4 --vision-max-age 5
 ```
 
 Use a wake word such as “robot” or “Mauricio.” A command can follow the wake word
@@ -248,12 +249,25 @@ Initial settings are deliberately explicit and need chassis testing:
 
 - Jev: up to 4 requests/second during tasks/input handling, 1/second while idle; one request in flight. Discard responses older
   than 450 ms or belonging to an earlier goal/subgoal.
-- Vision: 1 observation/second by default, configurable up to 2. Explicit
-  inspections take priority over the next background job. One pending job per
+- Explicit visual inspections take priority over the next background job. One pending job per
   kind prevents frame and speech backlogs; one model worker owns LFM inference.
   LFM and Whisper serialize device inference; Jev and motor control remain independent.
-- Vision becomes stale after 2 seconds or 25° of heading change. Motion then
-  stops until a fresh view is available. Camera capture itself runs continuously.
+- Vision becomes stale after 5 seconds from **capture**, or 25° of heading change.
+  Motion then stops until a fresh view is available. Camera capture itself runs
+  continuously. The worker selects the latest frame after acquiring the inference
+  lock, so speech/Whisper queue delays do not send an old queued image. Capture
+  timestamp and heading remain attached to the result; completion never resets age.
+- Periodic vision requests default to at most 0.4 Hz. Only one vision job can be
+  pending, and Jev can request a fresh view when that slot is available. A request
+  does not interrupt inference. This is an upper submission rate, not a promise
+  of constant throughput while speech or transcription occupies the same device.
+- On this 16 GB Mac, six saved-frame runs of the 3B 6-bit model with the existing
+  three-sentence prompt took 2.2–2.7 s each. Three speech candidates took 2.3–3.0 s;
+  isolated MLX peak allocation was 3.51 GB. These are replay timings, not a live
+  navigation validation. The 5 s freshness window accommodates inference without
+  treating the scene as current indefinitely. Longer contention may still stop
+  movement until a new view arrives. Jev decisions remain scheduled at 4 Hz,
+  independent of vision; firmware obstacle stops and telemetry timing are unchanged.
 - Host: rechecks fresh sensors at dispatch; stops when telemetry is older than
   250 ms. Stops after 500 ms without a usable decision.
 - Firmware: each motion lease is 600 ms; maximum accepted lease is 650 ms.

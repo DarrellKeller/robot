@@ -1,6 +1,6 @@
 # Mauricio
 
-An indoor robot using **Jev** for typed decisions, **LFM2.5-VL-450M** for local
+An indoor robot using **Jev** for typed decisions, **LFM2.5-VL-3B** for local
 vision and language, **Whisper/Piper** for conversation, and an **ESP32** for
 motor control and continuous ToF/MPU feedback.
 

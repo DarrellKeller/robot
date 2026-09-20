@@ -212,6 +212,22 @@ class DecisionLifecycle(unittest.TestCase):
         c.request_state = c.context()
         return c
 
+    def test_larger_model_freshness_uses_capture_time_and_heading(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.bare_controller(d)
+            c.args = SimpleNamespace(vision_max_age=5.0)
+            c.last_heading = None
+            c.dance_seconds = 0
+            c.activity = 'navigate'
+            c.link.snapshot.return_value = telemetry(heading_deg=72)
+            c.observation = {'text': 'Doorway ahead', 'captured_at': 996, 'heading_deg': 72}
+            with patch('jev_control.time.monotonic', return_value=1000):
+                self.assertTrue(Controller.context(c)['vision']['fresh'])
+                c.observation['captured_at'] = 994
+                self.assertFalse(Controller.context(c)['vision']['fresh'])
+                c.observation.update(captured_at=999, heading_deg=40)
+                self.assertFalse(Controller.context(c)['vision']['fresh'])
+
     def test_previous_goal_response_cannot_restart_motors(self):
         with tempfile.TemporaryDirectory() as d:
             c = self.bare_controller(d)

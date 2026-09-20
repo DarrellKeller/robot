@@ -16,7 +16,7 @@ MOVEMENTS = {
     "backward": "Both wheels drive backward: retreat opposite the camera direction; front objects recede. Briefly back away from a front obstruction over recently traversed space. No rear range sensors.",
     "left": "Left wheel backward, right wheel forward: pivot in place counterclockwise, without travelling toward the target. The camera looks farther left; stationary objects shift right. Use to align with a route on the left or look away from a blocked view.",
     "right": "Left wheel forward, right wheel backward: pivot in place clockwise, without travelling toward the target. The camera looks farther right; stationary objects shift left. Use to align with a route on the right or look away from a blocked view.",
-    "stop": "Remain still for a concrete reason: explicit stop, inactive goal, active listening, stale vision, all useful movements blocked, or visible hazard making even a pivot unsuitable."
+    "stop": "Pause briefly to reassess clearance and get a fresh view before the next movement. Also stop for explicit stop, inactive goal, active listening, stale vision, blocked movements, or a hazard. A pause does not abandon the goal."
 }
 SPEECH_TOOLS = {
     "none": "Remain silent; no useful speech, already answered, or speech is pending.",

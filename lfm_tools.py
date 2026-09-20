@@ -15,7 +15,8 @@ from runtime_log import record, capture_frame
 
 
 # MLX vision and Whisper share one device; serialize inference, never the control loop.
-LOCAL_INFERENCE_LOCK = threading.Lock()
+LOCAL_INFERENCE_LOCK = threading.RLock()
+DEFAULT_LFM_MODEL = "LiquidAI/LFM2.5-VL-3B-MLX-6bit"
 
 SCENE_PROMPT = """Describe this camera image in three short factual sentences.
 Include layout, openings, obstacles and relative directions; visible people's clothing, appearance and actions;
@@ -59,6 +60,7 @@ class Job:
     frame: object = field(default=None, compare=False)
     captured_at: float = field(default=0, compare=False)
     heading: float | None = field(default=None, compare=False)
+    submitted_at: float = field(default_factory=time.monotonic, compare=False)
 
 
 class Camera:
@@ -106,7 +108,9 @@ class Camera:
 
 
 class LFMTools:
-    def __init__(self):
+    def __init__(self, model_name=DEFAULT_LFM_MODEL, frame_provider=None):
+        self.model_name = model_name
+        self.frame_provider = frame_provider
         self.jobs = queue.PriorityQueue(maxsize=4)
         self.results = queue.Queue()
         self.lock = threading.Lock()
@@ -138,6 +142,7 @@ class LFMTools:
         from mlx_vlm.prompt_utils import apply_chat_template
 
         def infer(prompt, limit, temperature=0.0, images=None):
+            started = time.monotonic()
             formatted = apply_chat_template(processor, config, prompt, num_images=1 if images else 0)
             kwargs = {"image": images} if images else {}
             # Yield the local inference engine between candidate replies so a
@@ -148,7 +153,8 @@ class LFMTools:
             text = output.text.strip()
             record("lfm_generation", kind=job.kind, tool=job.tool, revision=job.revision,
                    prompt=prompt, temperature=temperature, max_tokens=limit, output=text,
-                   captured_at=job.captured_at, heading=job.heading)
+                   captured_at=job.captured_at, heading=job.heading,
+                   elapsed_s=round(time.monotonic() - started, 3))
             if not text:
                 raise ValueError("Empty LFM output")
             return text
@@ -208,16 +214,30 @@ class LFMTools:
                 continue
         return SpeechCandidates(candidates=candidates).candidates
 
+    def _execute(self, job, model, processor, config):
+        if job.kind == "vision":
+            # Wait for the shared inference engine BEFORE selecting the image.
+            # Speech/Whisper can delay a job, but cannot age its queued frame.
+            with LOCAL_INFERENCE_LOCK:
+                if self.frame_provider:
+                    frame, captured_at, heading = self.frame_provider()
+                    if frame is None or time.monotonic() - captured_at > 0.25:
+                        raise ValueError("No fresh camera frame at inference start")
+                    job.frame, job.captured_at, job.heading = frame, captured_at, heading
+                return self._generate(job, model, processor, config)
+        return self._generate(job, model, processor, config)
+
     def _run(self):
         try:
             from mlx_vlm import load
             from mlx_vlm.utils import load_config
-            name = "mlx-community/LFM2.5-VL-450M-6bit"
+            name = self.model_name
             with LOCAL_INFERENCE_LOCK:
                 model, processor = load(name)
                 config = load_config(name)
             ip = processor.image_processor
             ip.max_num_patches = max(ip.max_num_patches, (ip.tile_size // ip.patch_size) ** 2)
+            record("lfm_ready", model=name)
         except Exception as exc:
             self.results.put({"kind": "fatal", "error": type(exc).__name__})
             return
@@ -228,11 +248,15 @@ class LFMTools:
                 continue
             result = {"kind": job.kind, "tool": job.tool, "revision": job.revision,
                       "captured_at": job.captured_at, "heading_deg": job.heading}
+            started = time.monotonic()
+            result["queue_wait_s"] = round(started - job.submitted_at, 3)
             try:
-                result["value"] = self._generate(job, model, processor, config)
+                result["value"] = self._execute(job, model, processor, config)
             except Exception as exc:
                 result["error"] = type(exc).__name__
                 result["message"] = str(exc)
+            result.update(captured_at=job.captured_at, heading_deg=job.heading,
+                          elapsed_s=round(time.monotonic() - started, 3))
             # Publish before dropping pending so the controller cannot duplicate this job.
             self.results.put(result)
             with self.lock:

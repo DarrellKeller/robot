@@ -13,7 +13,7 @@ from pathlib import Path
 
 from audio_controller import AudioController
 from jev_client import JevClient, YES_THRESHOLD, GOAL_APPROVAL_THRESHOLD, COMPLETION_THRESHOLD
-from lfm_tools import Camera, LFMTools
+from lfm_tools import Camera, LFMTools, DEFAULT_LFM_MODEL
 from mission_store import MissionStore, validate_plan
 from robot_link import RobotLink, allowed_movements, SENSOR_NAMES
 from robot_schemas import Transcript, GoalDraft, SpeechCandidates
@@ -21,7 +21,7 @@ from runtime_log import start_trace, record, close_trace
 
 ROOT = Path(__file__).resolve().parent
 DECISION_MAX_AGE = 0.45
-VISION_MAX_AGE = 2.0
+VISION_MAX_AGE = 5.0
 
 
 def drain(q):
@@ -52,7 +52,8 @@ class Controller:
         self.client = JevClient()
         self.link = RobotLink(args.port, dry_run=not args.live)
         self.camera = None if args.no_camera else Camera(args.camera, lambda: self.link.snapshot().get("heading_deg"))
-        self.tools = LFMTools()
+        self.tools = LFMTools(model_name=args.lfm_model,
+                              frame_provider=self.camera.latest if self.camera else None)
         self.audio = AudioController(enabled=not args.no_audio)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jev")
         self.future = None
@@ -144,7 +145,7 @@ class Controller:
         observed_heading = vision.get("heading_deg")
         heading_change = None if heading is None or observed_heading is None else heading - observed_heading
         vision["heading_change_since_capture_deg"] = heading_change
-        vision["fresh"] = (bool(vision.get("text")) and vision["age_s"] <= VISION_MAX_AGE
+        vision["fresh"] = (bool(vision.get("text")) and vision["age_s"] <= self.args.vision_max_age
                            and heading_change is not None and abs(heading_change) <= 25)
         if heading is not None and self.last_heading is not None:
             sensors["heading_change_since_decision_deg"] = round(heading - self.last_heading, 1)
@@ -280,7 +281,9 @@ class Controller:
             value = result["value"]
             if kind == "vision":
                 self.observation = {"text": value, "captured_at": result["captured_at"],
-                                    "heading_deg": result["heading_deg"], "tool": "describe_scene"}
+                                    "heading_deg": result["heading_deg"], "tool": "describe_scene",
+                                    "inference_s": result.get("elapsed_s"),
+                                    "queue_wait_s": result.get("queue_wait_s")}
                 logging.info("SCENE: %s", value)
             elif kind == "goal":
                 self.goal_proposal = GoalDraft(goal=value).goal
@@ -542,12 +545,16 @@ def main():
     parser.add_argument('--camera', type=int, default=0)
     parser.add_argument('--no-camera', action='store_true')
     parser.add_argument('--no-audio', action='store_true')
-    parser.add_argument('--vision-hz', type=float, default=1)
+    parser.add_argument('--lfm-model', default=DEFAULT_LFM_MODEL, help='Resident MLX vision/language model')
+    parser.add_argument('--vision-hz', type=float, default=0.4, help='Maximum periodic vision submissions per second; one job pending at a time')
+    parser.add_argument('--vision-max-age', type=float, default=VISION_MAX_AGE,
+                        help='Maximum observation age from actual frame capture, in seconds')
     parser.add_argument('--decision-hz', type=float, default=4)
     parser.add_argument('--duration', type=float, default=0, help='Exit after this many seconds; zero runs until interrupted')
     args = parser.parse_args()
-    if not 0.1 <= args.vision_hz <= 2 or not 0.1 <= args.decision_hz <= 10 or args.duration < 0:
-        parser.error('Use vision 0.1–2 Hz, decisions 0.1–10 Hz, and a nonnegative duration')
+    if (not 0.1 <= args.vision_hz <= 2 or not 0.1 <= args.decision_hz <= 10
+        or not 0.5 <= args.vision_max_age <= 10 or args.duration < 0):
+        parser.error('Use vision 0.1–2 Hz, vision age 0.5–10 s, decisions 0.1–10 Hz, and a nonnegative duration')
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
     logging.info('Mode: %s', 'LIVE' if args.live else 'DRY RUN (no serial connection)')
     controller = Controller(args)
