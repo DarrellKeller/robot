@@ -63,12 +63,12 @@ class Boundaries(unittest.TestCase):
         for data in ({}, telemetry(age_s=0.3), telemetry(imu_valid=False), telemetry(imu_age_ms=101)):
             self.assertEqual(allowed_movements(data), ["stop"])
         self.assertEqual(allowed_movements(telemetry(tof_mm=[100, 900, 900, 900, 900])), ["stop", "forward"])
-        self.assertEqual(allowed_movements(telemetry(tof_mm=[900, 900, 100, 900, 900])), ["stop"])
+        self.assertEqual(allowed_movements(telemetry(tof_mm=[900, 900, 100, 900, 900])), ["stop", "backward"])
 
     def test_missing_tof_does_not_veto_motion_but_detected_obstacles_do(self):
         for ranges in ([900, None, 900, 900, 900], [None] * 5):
-            self.assertEqual(allowed_movements(telemetry(tof_mm=ranges)), ['stop', 'forward', 'left', 'right'])
-        self.assertEqual(allowed_movements(telemetry(tof_mm=[None, None, 100, None, None])), ['stop'])
+            self.assertEqual(allowed_movements(telemetry(tof_mm=ranges)), ['stop', 'forward', 'left', 'right', 'backward'])
+        self.assertEqual(allowed_movements(telemetry(tof_mm=[None, None, 100, None, None])), ['stop', 'backward'])
         self.assertEqual(allowed_movements(telemetry(tof_mm=[100, None, None, None, None])), ['stop', 'forward'])
 
     def test_reject_legacy_and_malformed_packets(self):
@@ -85,6 +85,8 @@ class Boundaries(unittest.TestCase):
         link.latest['tof_mm'][2] = 100
         self.assertEqual(link.command('forward'), 'stop')
         self.assertIn(b',stop,600\n', link.serial.write.call_args.args[0])
+        self.assertEqual(link.command('backward'), 'backward')
+        self.assertIn(b',backward,250\n', link.serial.write.call_args.args[0])
 
     def test_no_movement_on_old_decisions_or_missing_visual_context(self):
         a = answers()
@@ -94,7 +96,7 @@ class Boundaries(unittest.TestCase):
         self.assertEqual(choose_movement(a, state, 0.6), 'stop')
         for changes in ({'status': 'paused'}, {'awaiting_user_answer': True},
                         {'audio_state': 'listening'}, {'vision': {'fresh': False}},
-                        {'allowed_movements': ['stop']}, {'acknowledgment_pending': True}):
+                        {'allowed_movements': ['stop']}):
             self.assertEqual(choose_movement(a, state | changes, 0.2), 'stop')
         a['movement']['confidence'] = 0.4
         self.assertEqual(choose_movement(a, state, 0.2), 'forward')
@@ -314,14 +316,11 @@ class DecisionLifecycle(unittest.TestCase):
             self.assertEqual(c.store.data['goal'], 'Dance for the user')
             self.assertEqual(c.store.step['kind'], 'goal')
             self.assertTrue(c.speech_request)
-            self.assertGreater(c.acknowledgment_until, time.monotonic())
-            self.assertLessEqual(c.acknowledgment_until, time.monotonic() + 4)
             self.assertEqual(c.store.data['goal_user_request'], 'Dance for me')
             c.link.command.assert_called_with('stop')
             c.audio.events = __import__('queue').Queue()
             c.audio.events.put({'kind': 'speech_failed', 'revision': c.epoch})
             c.handle_audio()
-            self.assertEqual(c.acknowledgment_until, 0)
             self.assertEqual(c.store.step['kind'], 'goal')
 
     def test_goal_without_audio_does_not_wait_for_acknowledgment(self):

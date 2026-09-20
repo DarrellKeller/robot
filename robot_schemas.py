@@ -56,7 +56,7 @@ class JevDecisions(Contract):
     user_route: ChoiceAnswer[Literal['ignore', 'clarify', 'chat', 'goal', 'answer', 'cancel', 'resume']]
     approve_goal: NoulAnswer
     activity: ChoiceAnswer[Literal['wait', 'navigate', 'dance', 'talk', 'listen']]
-    movement: ChoiceAnswer[Literal['forward', 'left', 'right', 'stop']]
+    movement: ChoiceAnswer[Literal['forward', 'backward', 'left', 'right', 'stop']]
     need_fresh_vision: NoulAnswer
     lfm_speech_tool: ChoiceAnswer[Literal['none', 'ask_person_about_situation', 'answer_user', 'status_update', 'celebrate']]
     speech_choice: ChoiceAnswer[Literal['wait', 'reject', '1', '2', '3']]

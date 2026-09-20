@@ -25,6 +25,13 @@ class Contracts(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Transcript(text='Hello', quality={'no_speech_probability': float('nan')})
 
+    def test_whisper_metadata_cannot_kill_listener_validation(self):
+        quality = transcript_quality({'text': 'Mauricio', 'segments': [
+            {'no_speech_prob': 1.000001, 'compression_ratio': float('inf'), 'avg_logprob': None},
+            {'no_speech_prob': '0.3', 'compression_ratio': -1, 'avg_logprob': float('nan')}]})
+        self.assertEqual(quality['no_speech_probability'], 1.0)
+        Transcript(text='Mauricio', quality=quality)
+
     def test_unapproved_transcript_never_reaches_language_context(self):
         context = language_context({'pending_transcript': {'text':'garbage'}, 'legacy_dialogue': ['garbage'],
                                     'dialogue':[{'role':'user','text':'hello'}], 'goal':'Find table'})

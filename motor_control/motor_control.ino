@@ -49,7 +49,7 @@ void IRAM_ATTR onImuDataReady() {
   imuDataReady = true;
 }
 
-// Protocol v2: M,<sequence>,<stop|forward|left|right>,<lease_ms>\n
+// Protocol v2: M,<sequence>,<stop|forward|backward|left|right>,<lease_ms>\n
 // No legacy command can start a motor. Flash together with the Jev host.
 const uint8_t TCAADDR = 0x70;
 const uint8_t channels[5] = {7, 6, 5, 4, 3};
@@ -105,6 +105,7 @@ bool clearFor(const char* action) {
   // Turns sweep the chassis, so check valid returns in every direction.
   for (int i = 0; i < 5; ++i) {
     if (!rangeValid[i] || millis() - rangeAt[i] > SENSOR_MAX_AGE_MS) continue;
+    if (!strcmp(action, "backward") && i >= 1 && i <= 3) continue;
     if ((strcmp(action, "forward") || (i >= 1 && i <= 3)) && rangeMM[i] < CLEARANCE_MM)
       return false;
   }
@@ -115,10 +116,11 @@ void applyMotion() {
   if (!strcmp(motion, "stop")) { stopMotors(); return; }
   bool left = !strcmp(motion, "left");
   bool right = !strcmp(motion, "right");
-  digitalWrite(leftForward, left ? LOW : HIGH);
-  digitalWrite(leftBackward, left ? HIGH : LOW);
-  digitalWrite(rightForward, right ? LOW : HIGH);
-  digitalWrite(rightBackward, right ? HIGH : LOW);
+  bool backward = !strcmp(motion, "backward");
+  digitalWrite(leftForward, (left || backward) ? LOW : HIGH);
+  digitalWrite(leftBackward, (left || backward) ? HIGH : LOW);
+  digitalWrite(rightForward, (right || backward) ? LOW : HIGH);
+  digitalWrite(rightBackward, (right || backward) ? HIGH : LOW);
   analogWrite(leftPWM, (left || right) ? TURN_PWM : DRIVE_PWM);
   analogWrite(rightPWM, (left || right) ? TURN_PWM : DRIVE_PWM);
 }
@@ -133,10 +135,12 @@ void acceptCommand(char* line) {
   if (!strcmp(action, "stop")) { halt("commanded"); return; }
   if (!ttl || ttl > MAX_LEASE_MS) { halt("bad_lease"); return; }
   const char* selected = !strcmp(action, "forward") ? "forward" :
+                         !strcmp(action, "backward") ? "backward" :
                          !strcmp(action, "left") ? "left" :
                          !strcmp(action, "right") ? "right" : nullptr;
   if (!selected) { halt("bad_action"); return; }
   if (!clearFor(selected)) { halt("clearance_or_sensor"); return; }
+  if (!strcmp(selected, "backward") && ttl > 250) ttl = 250;
   motion = selected; stopReason = "none"; leaseUntil = millis() + ttl;
   applyMotion();
 }

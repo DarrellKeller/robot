@@ -13,6 +13,7 @@ COMPLETION_THRESHOLD = 0.9
 
 MOVEMENTS = {
     "forward": "Advance toward a visible target or opening along a clear route permitted by allowed_movements.",
+    "backward": "Briefly retreat from a front obstruction along recently traversed space; rear range sensors are absent. Reassess after each short movement.",
     "left": "Default search direction when the target is unseen or a wall fills the view: briefly pivot left if allowed. Also turn toward a target on the left or perform a requested left dance pivot.",
     "right": "Briefly pivot right toward a target on the right, when left is blocked, to continue an already productive rightward sweep, or for a requested right dance pivot.",
     "stop": "Remain still for a concrete reason: explicit stop, inactive goal, active listening, stale vision, all useful movements blocked, or visible hazard making even a pivot unsuitable."
@@ -46,7 +47,8 @@ def questions():
             'Choose the next activity for current_step, preserving task order. Use actual goal_events and recent '
             'outcomes; requests are not evidence of completion. Energetic Mauricio acknowledges new tasks, then '
             'acts. Speech can run alongside movement; an outstanding acknowledgment is not an exclusive talk '
-            'activity once acknowledgment_pending is false. An unseen target calls for search/navigation. Inactive: wait.',
+            'activity. When looking for a person to ask for a mission, finding one means talk/listen, not more searching. '
+            'An unseen target calls for search/navigation. Inactive: wait.',
             "criteria": {"wait": "Inactive mission, explicit waiting request, or no productive action currently available.",
                          "navigate": "Find or approach the goal using observed space and heading.",
                          "dance": "Perform the requested dance with short pivots.",
@@ -59,6 +61,8 @@ def questions():
             "If the target is not visible, or the camera faces a wall, prefer an allowed left/right pivot to look elsewhere. "
             "A wall ahead blocks forward travel toward it, not automatically an in-place pivot. "
             "Continue a useful search sweep; avoid switching left/right repeatedly without gaining a new view. "
+            "Do not circle endlessly: once a person is found for asking a mission, face them and stop to talk/listen. "
+            "If repeated pivots reveal the same scene, choose a visible route, brief backward retreat over recent space, or ask for help. "
             "When multiple pivots are reasonable, pick one rather than stop merely because there is no unique best direction. "
             "Use left as the initial search direction when neither side has a specific advantage. "
             "Missing ToF readings mean unknown range, not free space and not an automatic reason to wait. "

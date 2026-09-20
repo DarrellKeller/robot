@@ -37,7 +37,6 @@ def choose_movement(answers, state, result_age):
     if (result_age > DECISION_MAX_AGE
         or state["status"] != "active" or state["awaiting_user_answer"]
         or state["audio_state"] in {"listening", "transcribing"}
-        or state.get("acknowledgment_pending", False)
         or not state["vision"].get("fresh")):
         return "stop"
     action = answer["choice"]
@@ -110,7 +109,6 @@ class Controller:
             self.on_user(args.goal)
 
     def invalidate(self):
-        self.acknowledgment_until = 0
         self.epoch += 1
         self.audio.invalidate(self.epoch)
         self.last_decision_at = 0
@@ -162,7 +160,6 @@ class Controller:
                      pending_transcript=self.pending_transcript, goal_request=self.goal_request,
                      goal_proposal=self.goal_proposal, speech_candidates=self.speech_candidates,
                      speech_purpose=self.speech_purpose, speech_request=self.speech_request)
-        state["acknowledgment_pending"] = now < getattr(self, "acknowledgment_until", 0)
         return state
 
     def on_user(self, text, quality=None):
@@ -263,7 +260,6 @@ class Controller:
                     # Jev still reviews the verbatim request before installation.
                     self.goal_proposal = self.goal_request
                 if kind == "speech":
-                    self.acknowledgment_until = 0
                     self.speech_pending = False
                     self.last_speech_at = time.monotonic()
                 continue
@@ -294,7 +290,6 @@ class Controller:
                 if event["revision"] != self.epoch:
                     continue
                 self.speech_pending = False
-                self.acknowledgment_until = 0
                 self.last_speech_at = time.monotonic()
                 if kind == "speech_failed":
                     self.store.outcome("speech", "playback_failed")
@@ -361,7 +356,6 @@ class Controller:
                     self.invalidate()
                     if self.audio.enabled:
                         self.speech_request = "Briefly acknowledge the accepted task in Mauricio's cheeky voice. Say what you will do next without claiming completion."
-                        self.acknowledgment_until = now + 4
                     logging.info("GOAL approved by Jev: %s", goal)
                     record("goal_approved", goal=goal, original_request=original)
                 else:
@@ -380,7 +374,7 @@ class Controller:
         action = choose_movement(answers, state, now - self.request_at)
         if not step or step["kind"] not in {"navigate", "dance", "goal"} or self.activity not in {"navigate", "dance"}:
             action = "stop"
-        if step and step["kind"] == "dance" and action == "forward":
+        if step and step["kind"] == "dance" and action in {"forward", "backward"}:
             action = "stop"
         self.last_sent = self.link.command(action)
         record("motion_dispatch", requested=action, sent=self.last_sent, sensors=state["sensors"])
@@ -396,7 +390,6 @@ class Controller:
                 choice = selection["choice"]
                 if (choice == "reject" or int(choice) > len(self.speech_candidates)
                     or answers[f"speech_{choice}_ok"]["noul"] < YES_THRESHOLD):
-                    self.acknowledgment_until = 0
                     self.speech_candidates = []
                     self.speech_pending = False
                     self.last_speech_at = now

@@ -7,7 +7,7 @@ import math
 import threading
 import time
 
-ACTIONS = {"stop", "forward", "left", "right"}
+ACTIONS = {"stop", "forward", "backward", "left", "right"}
 SENSOR_NAMES = ("L90", "L45", "F", "R45", "R90")
 TELEMETRY_MAX_AGE = 0.25
 CLEARANCE_MM = 300
@@ -51,6 +51,10 @@ def allowed_movements(snapshot):
         allowed.append("forward")
     if not any(v is not None and v < CLEARANCE_MM for v in ranges):
         allowed.extend(("left", "right"))
+    # Retreat away from a front obstacle. Rear clearance is not measured;
+    # Jev must use recent route evidence, with a shorter command lease.
+    if not any(ranges[i] is not None and ranges[i] < CLEARANCE_MM for i in (0, 4)):
+        allowed.append("backward")
     return allowed
 
 
@@ -113,7 +117,8 @@ class RobotLink:
                 action = "stop"
             self.sequence += 1
             if self.serial:
-                self.serial.write(f"M,{self.sequence},{action},{LEASE_MS}\n".encode())
+                lease = 250 if action == "backward" else LEASE_MS
+                self.serial.write(f"M,{self.sequence},{action},{lease}\n".encode())
             return action
 
     def close(self):

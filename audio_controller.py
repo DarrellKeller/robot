@@ -6,6 +6,7 @@ import logging
 import re
 import threading
 import time
+import math
 from collections import Counter
 
 from robot_schemas import TranscriptQuality
@@ -19,10 +20,16 @@ def transcript_quality(result):
     words = re.findall(r"\w+", result.get("text", "").lower())
     triples = Counter(tuple(words[i:i + 3]) for i in range(max(0, len(words) - 2)))
     segments = result.get("segments", [])
+    def finite(value, default=0.0):
+        try:
+            value = float(value)
+            return value if math.isfinite(value) else default
+        except (TypeError, ValueError):
+            return default
     return TranscriptQuality(**{"word_count": len(words), "max_repeated_trigram": max(triples.values(), default=0),
-            "no_speech_probability": max((s.get("no_speech_prob", 0) for s in segments), default=0),
-            "compression_ratio": max((s.get("compression_ratio", 0) for s in segments), default=0),
-            "average_log_probability": min((s.get("avg_logprob", 0) for s in segments), default=0)}).model_dump()
+            "no_speech_probability": max((min(1.0, max(0.0, finite(s.get("no_speech_prob"), 1.0))) for s in segments), default=0.0),
+            "compression_ratio": max((max(0.0, finite(s.get("compression_ratio"))) for s in segments), default=0.0),
+            "average_log_probability": min((finite(s.get("avg_logprob")) for s in segments), default=0.0)}).model_dump()
 
 
 class AudioController:
@@ -150,19 +157,27 @@ class AudioController:
                         self.events.put({"kind": "listen_timeout"})
                     continue
                 self._state("transcribing" if was_command else "wake_transcribing")
-                with LOCAL_INFERENCE_LOCK:
-                    result = mlx_whisper.transcribe(captured,
-                        path_or_hf_repo="mlx-community/whisper-base.en-mlx", language="en",
-                        condition_on_previous_text=False)
-                text = result.get("text", "").strip()
-                quality = transcript_quality(result)
+                try:
+                    with LOCAL_INFERENCE_LOCK:
+                        result = mlx_whisper.transcribe(captured,
+                            path_or_hf_repo="mlx-community/whisper-base.en-mlx", language="en",
+                            condition_on_previous_text=False)
+                    text = result.get("text", "").strip()
+                    quality = transcript_quality(result)
+                except Exception as exc:
+                    record("transcription_error", error=type(exc).__name__, message=str(exc))
+                    logging.exception("Transcription failed; continuing to listen")
+                    if was_command:
+                        self.events.put({"kind": "listen_timeout"})
+                    continue
                 record("transcription", text=text, quality=quality, command=was_command)
                 if was_command:
                     self.events.put({"kind": "user" if text else "listen_timeout", "text": text, "quality": quality})
                     continue
                 listen_next = self._handle_wake(text, tts_ready, tts_module, quality)
         except Exception as exc:
-            self.events.put({"kind": "audio_error", "error": type(exc).__name__})
+            logging.exception("Audio worker failed")
+            self.events.put({"kind": "audio_error", "error": type(exc).__name__, "message": str(exc)})
         finally:
             self._state("disabled")
             if interface:

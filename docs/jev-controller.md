@@ -6,9 +6,8 @@ owns motor output, continuous sensor acquisition, clearance checks and a command
 watchdog. LFM2.5-VL-450M supplies scene descriptions, candidate replies and short goal drafts.
 Jev screens user input, approves goals, and selects every generated reply before playback.
 With audio enabled, a newly approved task requests a brief cheeky acknowledgment.
-Movement waits at most four seconds for it, released earlier on playback or
-speech failure/rejection. Speech cannot indefinitely block an otherwise valid
-action. Explicit `talk` steps still require actual playback to complete.
+Acknowledgment generation and playback do not block valid movement; speech
+and movement can run concurrently. Explicit `talk` steps still require actual playback to complete.
 Spoken replies become shared event history; the accepted request remains the goal.
 Without audio, the task starts directly. LFM drafts up to three replies; a failed
 candidate does not discard the usable ones, and Jev can only play an existing,
@@ -35,7 +34,7 @@ question holds motion until answered or listening times out.
 
 | Jev question | Type | Purpose |
 | --- | --- | --- |
-| `movement` | Choice | `forward`, `left`, `right`, `stop` |
+| `movement` | Choice | `forward`, `backward`, `left`, `right`, `stop` |
 | `need_fresh_vision` | Noul | Gate an additional visual inspection |
 | `user_route` | Choice | Reject noise, clarify, chat, goal, answer, cancel, resume |
 | `approve_goal` | Noul | Check a goal draft against the accepted request |
@@ -301,3 +300,9 @@ References: [TypeSafe architecture](https://docs.typesafe.ai/concepts/how-to-bui
 [API](https://docs.typesafe.ai/api),
 [Jev limitations](https://docs.typesafe.ai/model-jaggedness/jev-1.13),
 [Pololu VL53L0X library](https://github.com/pololu/vl53l0x-arduino).
+
+Backward movement uses a 250 ms renewable lease and checks measured side clearance.
+The robot has no rear range sensor; Jev is instructed to retreat briefly over
+recently traversed space and reassess. Front obstacles do not prevent retreat.
+Whisper metadata is normalized before validation; transcription failures are
+logged and the listener continues instead of silently terminating.
