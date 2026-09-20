@@ -43,6 +43,36 @@ class WakeAcknowledgement(unittest.TestCase):
         self.assertTrue(audio._handle_wake('Mauricio!', True, tts))
         self.assertTrue(audio.events.empty())
 
+    def test_jev_listen_cues_before_command_capture(self):
+        audio = AudioController(enabled=False)
+        tts = Mock()
+        tts.speak.return_value = True
+        self.assertTrue(audio._handle_job(None, False, 0, True, tts))
+        tts.speak.assert_called_once_with('Huh?')
+        self.assertEqual(audio.status(), 'listening')
+        self.assertEqual(audio.events.get_nowait(), {'kind': 'listening'})
+        self.assertTrue(audio.events.empty())
+
+    def test_jev_question_plays_question_then_listening_cue(self):
+        audio = AudioController(enabled=False)
+        tts = Mock()
+        tts.speak.return_value = True
+        self.assertTrue(audio._handle_job('Where should I go?', True, 0, True, tts))
+        self.assertEqual([c.args[0] for c in tts.speak.call_args_list], ['Where should I go', 'Huh?'])
+        spoken = audio.events.get_nowait()
+        self.assertEqual(spoken['kind'], 'spoken')
+        self.assertEqual(spoken['text'], 'Where should I go')
+        self.assertEqual(audio.events.get_nowait(), {'kind': 'listening'})
+        self.assertTrue(audio.events.empty())
+
+    def test_stale_jev_listen_job_does_not_play_cue(self):
+        audio = AudioController(enabled=False)
+        audio.invalidate(1)
+        tts = Mock()
+        self.assertIsNone(audio._handle_job(None, False, 0, True, tts))
+        tts.speak.assert_not_called()
+        self.assertTrue(audio.events.empty())
+
     def test_same_utterance_command_is_preserved(self):
         audio = AudioController(enabled=False)
         self.assertFalse(audio._handle_wake('Robot, stop.', True, Mock()))

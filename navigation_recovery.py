@@ -3,14 +3,13 @@ from robot_link import SENSOR_NAMES, CLEARANCE_MM
 
 CLEAR_MM = 400
 CLEAR_HOLD_S = 0.3
-REVERSE_LIMIT_S = 2.0
-IMPROVING_REVERSE_LIMIT_S = 4.0
+REVERSE_LIMIT_S = 4.0
 ATTEMPT_S = 0.5
 IMPROVEMENT_MM = 20
 TURN_DEGREES = 20
-TURN_LIMIT_S = 1.5
-RECOVERY_LIMIT_S = 20
-FAILED_ATTEMPT_LIMIT = 3
+TURN_LIMIT_S = 3.0
+RECOVERY_LIMIT_S = 30
+FAILED_ATTEMPT_LIMIT = 4
 
 
 class Recovery:
@@ -83,10 +82,18 @@ class Recovery:
                 self.reverse_s += dt
                 self.chunk_s += dt
             if self.chunk_s >= ATTEMPT_S:
-                improved = clearance is not None and self.baseline is not None and clearance >= self.baseline + IMPROVEMENT_MM
-                self.trend = "improving" if improved else "unknown" if clearance is None else "not improving"
-                self.bad_attempts = 0 if improved else self.bad_attempts + 1
-                self.baseline, self.chunk_s = clearance, 0.0
+                if clearance is None or self.baseline is None:
+                    self.trend = "unknown"
+                    # Missing data is not evidence of a failed retreat. Preserve
+                    # the last valid baseline so reacquisition can show progress.
+                    if clearance is not None:
+                        self.baseline = clearance
+                else:
+                    improved = clearance >= self.baseline + IMPROVEMENT_MM
+                    self.trend = "improving" if improved else "not improving"
+                    self.bad_attempts = 0 if improved else self.bad_attempts + 1
+                    self.baseline = clearance
+                self.chunk_s = 0.0
             if clearance is not None and clearance > CLEAR_MM:
                 if self.clear_since is None:
                     self.clear_since = now
@@ -94,8 +101,7 @@ class Recovery:
                     self.phase = "turn"
             else:
                 self.clear_since = None
-            reverse_limit = IMPROVING_REVERSE_LIMIT_S if self.trend == "improving" else REVERSE_LIMIT_S
-            if self.phase == "retreat" and (self.reverse_s >= reverse_limit or self.bad_attempts >= FAILED_ATTEMPT_LIMIT):
+            if self.phase == "retreat" and (self.reverse_s >= REVERSE_LIMIT_S or self.bad_attempts >= FAILED_ATTEMPT_LIMIT):
                 self.phase, self.reason = "help", "Reverse budget exhausted or clearance failed to improve"
         elif self.phase == "turn":
             if (sensors.get("motion") in {"left", "right"} and sensors.get("imu_valid")

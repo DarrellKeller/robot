@@ -367,11 +367,10 @@ Both Jev and LFM speech receive the current recovery objective and steering advi
 - **observe:** stop, then require a fresh scene captured after telemetry confirms
   the turn has stopped. Resume the original task; this does not prove delivery or
   any other main-task completion.
-- **help:** stop and ask for guidance or repositioning. Enter after three
-  half-second reverse intervals without at least 2 cm clearance improvement,
-  two seconds total reported reverse motion (extended to at most four seconds
-  while measured clearance is improving), 1.5 seconds of unsuccessful pivoting,
-  or 20 seconds of active recovery without completion. A Jev-accepted answer,
+- **help:** stop and ask for guidance or repositioning. Enter after four
+  half-second reverse intervals with valid comparable readings showing less than
+  2 cm clearance improvement, four seconds total reported reverse motion, three
+  seconds of unsuccessful pivoting, or 30 seconds of active recovery without completion. A Jev-accepted answer,
   steering instruction or explicit resume allows a new attempt.
 
 These are initial tuning limits, not calibrated travel distances. Motor telemetry
@@ -414,3 +413,14 @@ Conversation continuity is application-owned: shared goals, the last 24 accepted
 messages, observations and events are passed to Instruct each time. Changing to a
 Thinking model would not itself add persistent memory. Memory still starts fresh
 on a normal reboot.
+
+Missing recovery readings mark progress unknown without incrementing failed
+attempts or discarding the last valid baseline. Reacquired readings can demonstrate
+improvement. Unknown readings still do not establish turning clearance, and reverse
+remains capped at four seconds because the robot has no rear sensor.
+
+Every Jev listen action, and the answer window following a Jev-requested question,
+plays the fixed `Huh?` cue before command capture starts. Wake detection uses the
+same cue. This bypasses language generation, creates a `listening_cue` trace event,
+and does not enter conversation history or complete a talk step. Speak after the
+cue; the microphone remains closed during TTS playback.

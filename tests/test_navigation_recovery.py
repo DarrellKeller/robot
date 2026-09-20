@@ -59,11 +59,39 @@ class RecoveryReplay(unittest.TestCase):
 
     def test_continuous_reverse_cannot_evade_attempt_limit(self):
         self.feed()
-        for _ in range(19):
+        for _ in range(26):
             self.feed(motion='backward')
         self.assertEqual(self.r.phase, 'help')
-        self.assertGreaterEqual(self.r.bad_attempts, 3)
+        self.assertGreaterEqual(self.r.bad_attempts, 4)
         self.assertEqual(self.r.allowed(['stop', 'backward']), ['stop'])
+
+    def test_missing_ranges_do_not_count_as_failure_but_reverse_stays_bounded(self):
+        self.feed()
+        for _ in range(25):
+            self.feed(None, motion='backward')
+        self.assertEqual(self.r.phase, 'retreat')
+        self.assertEqual(self.r.bad_attempts, 0)
+        for _ in range(20):
+            self.feed(None, motion='backward')
+        self.assertEqual(self.r.phase, 'help')
+        self.assertEqual(self.r.bad_attempts, 0)
+
+    def test_reacquired_range_can_confirm_progress(self):
+        self.feed()
+        for _ in range(8):
+            self.feed(None, motion='backward')
+        for _ in range(6):
+            self.feed(350, motion='backward')
+        self.assertEqual(self.r.trend, 'improving')
+        self.assertEqual(self.r.bad_attempts, 0)
+        self.assertEqual(self.r.phase, 'retreat')
+
+    def test_slow_pivot_has_time_to_reach_measured_heading(self):
+        self.feed()
+        self.clear()
+        for i in range(23):
+            self.feed(450, motion='left', heading_deg=i)
+        self.assertEqual(self.r.phase, 'observe')
 
     def test_improvement_does_not_allow_unbounded_reverse(self):
         self.feed(100)
@@ -77,7 +105,7 @@ class RecoveryReplay(unittest.TestCase):
 
     def test_stops_do_not_count_as_reverse_attempts_and_timeout_asks_help(self):
         self.feed()
-        for _ in range(205):
+        for _ in range(305):
             self.feed()
         self.assertEqual(self.r.reverse_s, 0)
         self.assertEqual(self.r.bad_attempts, 0)

@@ -97,18 +97,43 @@ class AudioController:
             stream.close()
         return np.concatenate(chunks) if chunks and voiced else None
 
+    def _begin_listening(self, tts_ready, tts_module, source):
+        # Same immediate cue for Jev tools and wake detection. This is not a
+        # generated reply and must never complete a talk step or enter dialogue.
+        self._state("listening")
+        self.events.put({"kind": "listening"})
+        success = bool(tts_ready and tts_module.speak("Huh?"))
+        record("listening_cue", source=source, played=success)
+        if not success:
+            logging.warning("Listening cue playback failed")
+
+    def _handle_job(self, text, ask, revision, tts_ready, tts_module):
+        with self.lock:
+            if revision != self.revision:
+                return None
+        if text is None:
+            self._begin_listening(tts_ready, tts_module, "jev_listen")
+            return True
+        self._state("talking")
+        original_text, text = text, plain_speech(text)
+        record("speech_playback_started", approved_text=original_text, tts_text=text, revision=revision)
+        success = tts_ready and tts_module.speak(text)
+        self.events.put({"kind": "spoken" if success else "speech_failed",
+                         "text": text, "ask": ask, "revision": revision})
+        with self.lock:
+            valid = revision == self.revision
+        listen_next = bool(ask and success and valid)
+        if listen_next:
+            self._begin_listening(tts_ready, tts_module, "jev_question")
+        return listen_next
+
     def _handle_wake(self, text, tts_ready, tts_module, quality=None):
         match = re.search(r'\b(' + '|'.join(WAKE_WORDS) + r')\b', text, re.I)
         if not match:
             return False
         logging.info("Wake word detected: %s", match.group())
-        # Stop before acknowledging; capture has already closed the microphone.
-        # This acknowledgement must never complete a mission's talk step.
-        self._state("listening")
-        self.events.put({"kind": "listening"})
         record("wake_detected", word=match.group(), transcript=text)
-        if not (tts_ready and tts_module.speak("Huh?")):
-            logging.warning("Wake acknowledgement playback failed")
+        self._begin_listening(tts_ready, tts_module, "wake_word")
         remainder = text[match.end():].strip(' ,.!?')
         if remainder:
             self.events.put({"kind": "user", "text": remainder, "quality": quality or {}})
@@ -132,22 +157,9 @@ class AudioController:
                 except queue.Empty:
                     pass
                 else:
-                    with self.lock:
-                        valid = revision == self.revision
-                    if valid:
-                        if text is None:
-                            listen_next = True
-                            self.events.put({"kind": "listening"})
-                            continue
-                        self._state("talking")
-                        original_text, text = text, plain_speech(text)
-                        record("speech_playback_started", approved_text=original_text, tts_text=text, revision=revision)
-                        success = tts_ready and tts_module.speak(text)
-                        self.events.put({"kind": "spoken" if success else "speech_failed",
-                                         "text": text, "ask": ask, "revision": revision})
-                        listen_next = bool(ask and success)
-                        if listen_next:
-                            self.events.put({"kind": "listening"})
+                    next_capture = self._handle_job(text, ask, revision, tts_ready, tts_module)
+                    if next_capture is not None:
+                        listen_next = next_capture
                     continue
                 self._state("listening" if listen_next else "wake_listening")
                 captured = self._capture(interface, pyaudio, np, command=listen_next)
