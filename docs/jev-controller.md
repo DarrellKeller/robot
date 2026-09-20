@@ -216,7 +216,10 @@ Initial settings are deliberately explicit and need chassis testing:
   their turn. Commands, watchdog and MPU are serviced between measurements.
   Each library polling phase has a 30 ms timeout (two phases per measurement).
   Telemetry is emitted at the first loop opportunity after 50 ms, in every mode.
-  Invalid/stale ranges are `null`, never “clear.” MPU is polled during turns too.
+  Invalid/stale ranges are `null`, never “clear.” `tof_status` distinguishes
+  `ok`, `out_of_range`, `timeout`, `i2c_error`, `mux_error`, `init_failed`, and `stale`.
+  Startup sensor timeout matches main at 200 ms; runtime polls remain bounded
+  at 30 ms per phase. MPU is polled during turns too.
 - Motion requires fresh telemetry and a fresh calibrated MPU. Missing ToF returns
   no longer veto movement: they remain unknown, and Jev must assess the route from
   fresh vision. Detected obstacles still stop motion at 300 mm: forward checks the

@@ -347,6 +347,8 @@ class Controller:
         action = choose_movement(answers, state, now - self.request_at)
         if not step or step["kind"] not in {"navigate", "dance", "goal"} or self.activity not in {"navigate", "dance"}:
             action = "stop"
+        if step and step["kind"] == "dance" and action == "forward":
+            action = "stop"
         self.last_sent = self.link.command(action)
         if action != self.last_sent:
             self.store.outcome(action, "host_clearance_gate")

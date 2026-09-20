@@ -58,6 +58,7 @@ bool sensorReady[5] = {};
 int rangeMM[5] = {};
 unsigned long rangeAt[5] = {};
 bool rangeValid[5] = {};
+const char* rangeStatus[5] = {"init_failed", "init_failed", "init_failed", "init_failed", "init_failed"};
 const unsigned long SENSOR_MAX_AGE_MS = 250;
 const unsigned long MAX_LEASE_MS = 650;
 const int CLEARANCE_MM = 300;
@@ -165,12 +166,15 @@ void pollRange() {
   static uint8_t i = 0;
   if (sensorReady[i] && selectChannel(channels[i])) {
     uint16_t mm = sensors[i].readRangeSingleMillimeters();
-    rangeValid[i] = !sensors[i].timeoutOccurred() && sensors[i].last_status == 0
-                    && mm > 0 && mm < 8190;
+    bool timedOut = sensors[i].timeoutOccurred();
+    rangeValid[i] = !timedOut && sensors[i].last_status == 0 && mm > 0 && mm < 8190;
+    rangeStatus[i] = timedOut ? "timeout" : sensors[i].last_status != 0 ? "i2c_error" :
+                     (mm == 0 || mm >= 8190) ? "out_of_range" : "ok";
     rangeMM[i] = mm;
     rangeAt[i] = millis();
   } else {
     rangeValid[i] = false;
+    rangeStatus[i] = sensorReady[i] ? "mux_error" : "init_failed";
   }
   i = (i + 1) % 5;
 }
@@ -184,6 +188,11 @@ void telemetry() {
     if (i) Serial.print(',');
     if (rangeValid[i] && millis() - rangeAt[i] <= SENSOR_MAX_AGE_MS) Serial.print(rangeMM[i]);
     else Serial.print("null");
+  }
+  Serial.print("],\"tof_status\":[");
+  for (int i = 0; i < 5; ++i) {
+    if (i) Serial.print(',');
+    Serial.printf("\"%s\"", rangeValid[i] && millis() - rangeAt[i] > SENSOR_MAX_AGE_MS ? "stale" : rangeStatus[i]);
   }
   Serial.printf("],\"heading_deg\":%.2f,\"yaw_rate_dps\":%.2f,\"imu_valid\":%s,\"imu_age_ms\":%lu,\"imu_model\":\"%s\"}\n",
     gyroState.headingDeg, gyroState.rateDps, freshIMU() ? "true" : "false",
@@ -199,7 +208,7 @@ void setup() {
   Wire.begin(); Wire.setTimeOut(5);
   for (int i = 0; i < 5; ++i) {
     if (!selectChannel(channels[i])) continue;
-    sensors[i].setTimeout(100);
+    sensors[i].setTimeout(200); // Match main's startup calibration allowance.
     sensorReady[i] = sensors[i].init();
     if (sensorReady[i]) {
       sensors[i].setMeasurementTimingBudget(20000);
